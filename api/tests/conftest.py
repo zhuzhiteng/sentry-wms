@@ -100,6 +100,14 @@ ALL_TABLES = [
     "dockd_idempotency",
     "wms_tokens",
     "inbound_source_systems_allowlist",
+    # Shipyard downstream tables. They reference base warehouses, bins, and
+    # items, so they must be wiped before those base tables below.
+    "shipyard_pallet_units",
+    "shipyard_cargo_tickets",
+    "shipyard_inbound_lines",
+    "shipyard_inbound_manifests",
+    "shipyard_zone_ship_mappings",
+    "shipyard_project_bindings",
     # v1.8.0 #283: per-user productivity dashboard overrides; FK to
     # users with ON DELETE CASCADE.
     "user_dashboard_preferences",
