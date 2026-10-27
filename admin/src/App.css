@@ -1268,6 +1268,11 @@ a {
   flex-wrap: wrap;
 }
 
+.shipyard-error-text {
+  color: var(--danger);
+  font-weight: 700;
+}
+
 .shipyard-dropzone {
   display: flex;
   align-items: center;

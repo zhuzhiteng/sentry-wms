@@ -54,6 +54,56 @@ const dispatches = {
 };
 
 const notes = { delivery_notes: [] };
+const formalManifests = { manifests: [] };
+const formalOrders = { orders: [] };
+
+const formalDetail = {
+  manifest: {
+    manifest_id: 'formal-1',
+    manifest_no: 'OB-20261027-001',
+    factory_shipment_no: 'CX-20261027-001',
+    source_file_name: '正式出库清单.xlsx',
+    status: 'PARSED',
+    metadata: { sheet_name: '出库清单' },
+  },
+  lines: [
+    {
+      line_id: 'formal-line-1',
+      source_row_no: '1',
+      ship_no: 'H9301',
+      engineering_no: 'H9301',
+      production_drawing_no: 'D-001',
+      material_code: 'MAT-001',
+      item_name: '船用支架',
+      item_spec: 'S-100',
+      demand_quantity: '4.000',
+      allocated_quantity: '4.000',
+      shortage_quantity: '0.000',
+      unit: '件',
+      match_status: 'READY',
+      expected_tag_suffixes: ['1-1', '1-2'],
+      tasks: [
+        {
+          ticket_id: 'ticket-1',
+          ticket_no: 'T-001',
+          available_quantity: '4.000',
+          location_path_snapshot: 'A 区 / A1',
+          tag_suffixes: ['1-1', '1-2'],
+        },
+      ],
+    },
+  ],
+  order: null,
+  validation: {
+    blocking_errors: [],
+    summary: {
+      line_count: 1,
+      task_count: 1,
+      shortage_line_count: 0,
+      total_shortage_quantity: '0.000',
+    },
+  },
+};
 
 const importDetail = {
   import: {
@@ -128,6 +178,8 @@ describe('ShipyardOutbound', () => {
       if (path.includes('distribution-imports')) return okJson(imports);
       if (path.includes('dispatches')) return okJson(dispatches);
       if (path.includes('delivery-notes')) return okJson(notes);
+      if (path.includes('formal-manifests')) return okJson(formalManifests);
+      if (path.includes('/outbound/orders')) return okJson(formalOrders);
       return okJson({});
     });
   });
@@ -175,7 +227,7 @@ describe('ShipyardOutbound', () => {
     const { container } = render(<ShipyardOutbound />);
     await screen.findByText('DIST-20261027-ABCD1234');
 
-    const input = container.querySelector('input[type="file"]');
+    const input = container.querySelector('#shipyard-demand-file');
     fireEvent.change(input, {
       target: {
         files: [
@@ -193,6 +245,37 @@ describe('ShipyardOutbound', () => {
     expect(form.get('warehouse_id')).toBe('1');
     expect(form.get('file').name).toBe('船厂配送.xlsx');
     expect(await screen.findByText('配送需求预览 · DIST-NEW')).toBeInTheDocument();
+  });
+
+  it('uploads a formal outbound workbook and shows material identity', async () => {
+    vi.mocked(api.postForm).mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve(formalDetail),
+    });
+    const { container } = render(<ShipyardOutbound />);
+    await screen.findByText('DIST-20261027-ABCD1234');
+
+    const input = container.querySelector('#shipyard-formal-outbound-file');
+    fireEvent.change(input, {
+      target: {
+        files: [
+          new File(['xlsx'], 'formal.xlsx', {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          }),
+        ],
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '识别并匹配库存' }));
+
+    await waitFor(() => {
+      expect(api.postForm).toHaveBeenCalledWith(
+        '/shipyard/outbound/formal-manifests/preview',
+        expect.any(FormData),
+      );
+    });
+    expect(await screen.findByText('MAT-001')).toBeInTheDocument();
+    expect(screen.getByText('A 区 / A1')).toBeInTheDocument();
   });
 
   it('confirms a parsed import only after opening its detail', async () => {
