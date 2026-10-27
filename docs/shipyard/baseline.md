@@ -55,12 +55,12 @@ Windows.
 Commands use a dedicated `sentry_test` database.
 
 ```text
-Backend: 3045 passed, 55 skipped, 11 warnings
+Backend: 3048 passed, 55 skipped, 11 warnings
 Admin:   32 test files passed, 203 tests passed
 Miniprogram: 17 tests passed
 Admin build: production build passed
 Schema:  087 applied twice to test; fresh db/schema.sql created
-HTTP E2E: passed (abnormal, permission, warehouse and concurrency paths)
+HTTP E2E: passed (50 requests per operation, 10 concurrent)
 ```
 
 The admin suite passed as four serialized-worker shards: each shard ran eight
@@ -97,6 +97,18 @@ concurrent loading idempotency, refreshed backend reads and photo-byte
 verification. It also verifies role/page permission gates and cross-warehouse
 isolation. OCR is a deterministic test stub because CI has no public-cloud
 credentials.
+
+Receipt, outbound confirmation and loading each submit 50 requests through 10
+concurrent workers with the same idempotency key. At the end of the run,
+database invariant queries verify ticket balance against the stock ledger,
+receipt totals, the single outbound ledger entry, per-pallet photo/OCR ownership,
+pallet status, and the unique loading confirmation.
+
+`test_shipyard_permission_matrix.py` enumerates all 49 current shipyard routes:
+every route must return `403` without its page permission, and all 26 non-GET
+routes must return `403` for a viewer with those pages but no business role.
+The same suite reproduces warehouse-2 manager access to a warehouse-1 zone
+mapping and requires `403`.
 
 The development override avoids production-only webhook SSRF startup guards.
 It does not disable authentication, tenant checks, or inventory locking.
@@ -158,3 +170,11 @@ The formal-outbound mobile routes require both a shipyard mobile role and the
 legacy scan/photo compatibility routes, whole-ticket confirmation, loading
 confirmation and evidence downloads. Knowing a valid task or photo ID does not
 bypass the page-permission gate.
+
+## Delivery status
+
+At 2026-10-28, PR #465 is open, mergeable and not deployed. GitHub reports
+`mergeable_state=blocked` because the four pull-request workflow runs are
+`action_required` for a first-time fork contributor. The required branch checks
+are configured, but none has produced a check run until an upstream maintainer
+approves the workflows.

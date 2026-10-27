@@ -18,6 +18,7 @@ import os
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 from io import BytesIO
 from urllib.parse import urlsplit
 
@@ -156,21 +157,43 @@ def _parallel_json_posts(
     path: str,
     payload: dict,
     *,
-    count: int = 2,
+    count: int = 50,
+    max_workers: int = 10,
 ) -> list[requests.Response]:
     authorization = session.headers["Authorization"]
+    expected_header_hash = sha256(authorization.encode()).hexdigest()[:16]
 
     def post_once():
-        return requests.post(
+        response = requests.post(
             f"{api_base}{path}",
             json=payload,
             headers={"Authorization": authorization},
             timeout=30,
         )
+        return response
 
-    with ThreadPoolExecutor(max_workers=count) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(post_once) for _ in range(count)]
-        return [future.result() for future in futures]
+        responses = [future.result() for future in futures]
+    failures = [response for response in responses if response.status_code == 401]
+    if failures:
+        observed_header_hashes = {
+            sha256(
+                (response.request.headers.get("Authorization") or "").encode()
+            ).hexdigest()[:16]
+            for response in failures
+        }
+        sequential_check = session.get(f"{api_base}/auth/me", timeout=10)
+        raise AssertionError(
+            {
+                "expected_header_hash": expected_header_hash,
+                "observed_header_hashes": sorted(observed_header_hashes),
+                "sequential_auth_status": sequential_check.status_code,
+                "failure_count": len(failures),
+                "failure_bodies": [response.text[:200] for response in failures[:3]],
+            }
+        )
+    return responses
 
 
 def _first_bin_id() -> int:
@@ -251,6 +274,130 @@ def _database_evidence(ticket_id: str, confirmation_id: str) -> dict:
             "photo_links": photo_links,
             "outbound_ledger_count": ledger_count,
             "outbound_delta": str(outbound_delta),
+        }
+    finally:
+        connection.close()
+
+
+def _database_invariants() -> dict:
+    queries = {
+        "ticket_ledger_balance": """
+            SELECT t.ticket_id::text
+              FROM shipyard_cargo_tickets t
+              LEFT JOIN shipyard_stock_ledger l
+                ON l.ticket_id = t.ticket_id
+             GROUP BY t.ticket_id, t.on_hand_quantity
+            HAVING t.on_hand_quantity <> COALESCE(SUM(l.quantity_delta), 0)
+        """,
+        "ticket_receipt_total": """
+            SELECT t.ticket_id::text
+              FROM shipyard_cargo_tickets t
+              LEFT JOIN shipyard_receipts r
+                ON r.ticket_id = t.ticket_id
+             GROUP BY t.ticket_id, t.received_quantity
+            HAVING t.received_quantity <> COALESCE(SUM(r.received_quantity), 0)
+        """,
+        "outbound_confirmation_ledger": """
+            SELECT c.confirmation_id::text
+              FROM shipyard_outbound_confirmations c
+              LEFT JOIN shipyard_stock_ledger l
+                ON l.source_type = 'OUTBOUND'
+               AND l.source_id = c.confirmation_id
+             GROUP BY c.confirmation_id, c.quantity,
+                      c.previous_on_hand, c.balance_after
+            HAVING COUNT(l.source_id) <> 1
+                OR COALESCE(MIN(l.quantity_delta), 0) <> -c.quantity
+                OR c.previous_on_hand - c.quantity <> c.balance_after
+                OR c.balance_after <> 0
+        """,
+        "outbound_confirmation_pallets": """
+            SELECT c.confirmation_id::text
+              FROM shipyard_outbound_confirmations c
+              JOIN shipyard_outbound_tasks t
+                ON t.task_id = c.task_id
+              LEFT JOIN shipyard_outbound_confirmation_pallets cp
+                ON cp.confirmation_id = c.confirmation_id
+              LEFT JOIN shipyard_label_recognitions lr
+                ON lr.recognition_id = cp.label_recognition_id
+              LEFT JOIN shipyard_photos ph
+                ON ph.photo_id = cp.photo_id
+             GROUP BY c.confirmation_id, c.task_id, c.ticket_id,
+                      t.expected_pallet_count
+            HAVING COUNT(cp.pallet_id) <> t.expected_pallet_count
+                OR COUNT(DISTINCT cp.tag_suffix) <> t.expected_pallet_count
+                OR COUNT(DISTINCT cp.photo_id) <> t.expected_pallet_count
+                OR COUNT(*) FILTER (
+                    WHERE lr.recognition_id IS NULL
+                       OR lr.task_id <> c.task_id
+                       OR lr.ticket_id <> c.ticket_id
+                       OR lr.photo_id <> cp.photo_id
+                   ) > 0
+                OR COUNT(*) FILTER (
+                    WHERE ph.outbound_confirmation_id <> c.confirmation_id
+                   ) > 0
+        """,
+        "outbound_task_ticket_pallets": """
+            SELECT t.task_id::text
+              FROM shipyard_outbound_tasks t
+              JOIN shipyard_cargo_tickets c
+                ON c.ticket_id = t.ticket_id
+             WHERE t.status = 'OUTBOUND'
+               AND (
+                   c.status <> 'OUTBOUND'
+                   OR c.on_hand_quantity <> 0
+                   OR EXISTS (
+                       SELECT 1
+                         FROM shipyard_pallet_units p
+                        WHERE p.ticket_id = t.ticket_id
+                          AND p.status <> 'OUTBOUND'
+                   )
+               )
+        """,
+        "loaded_order_loading": """
+            SELECT o.outbound_order_id::text
+              FROM shipyard_outbound_orders o
+              LEFT JOIN shipyard_outbound_loading_confirmations l
+                ON l.outbound_order_id = o.outbound_order_id
+             WHERE o.status = 'LOADED'
+             GROUP BY o.outbound_order_id
+            HAVING COUNT(l.loading_confirmation_id) <> 1
+                OR EXISTS (
+                    SELECT 1
+                      FROM shipyard_outbound_tasks t
+                     WHERE t.outbound_order_id = o.outbound_order_id
+                       AND t.status <> 'OUTBOUND'
+                )
+        """,
+    }
+    violations = {}
+    connection = psycopg2.connect(TEST_DATABASE_URL)
+    try:
+        cursor = connection.cursor()
+        for name, query in queries.items():
+            cursor.execute(query)
+            rows = [row[0] for row in cursor.fetchall()]
+            if rows:
+                violations[name] = rows
+        cursor.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM shipyard_cargo_tickets),
+                (SELECT COUNT(*) FROM shipyard_stock_ledger),
+                (SELECT COUNT(*) FROM shipyard_outbound_confirmations),
+                (
+                    SELECT COUNT(*)
+                      FROM shipyard_outbound_confirmation_pallets
+                )
+            """
+        )
+        ticket_count, ledger_count, confirmation_count, pallet_count = cursor.fetchone()
+        return {
+            "passed": not violations,
+            "violations": violations,
+            "ticket_count": ticket_count,
+            "ledger_count": ledger_count,
+            "confirmation_count": confirmation_count,
+            "confirmation_pallet_count": pallet_count,
         }
     finally:
         connection.close()
@@ -509,7 +656,9 @@ def run() -> dict:
                 ),
                 409,
             )
-            steps.append("缺托、复用照片被拦截；同键并发收货只落账一次，库存 4.000")
+            steps.append(
+                "缺托、复用照片被拦截；50 请求/10 并发收货只落账一次，库存 4.000"
+            )
 
             outbound_preview = _json(
                 session.post(
@@ -674,6 +823,78 @@ def run() -> dict:
                 ),
                 403,
             )
+            foreign_resource_checks = [
+                (
+                    foreign_receiver,
+                    "GET",
+                    "/shipyard/inbound/manifests?warehouse_id=1",
+                ),
+                (
+                    foreign_receiver,
+                    "GET",
+                    f"/shipyard/inbound/manifests/{manifest_id}",
+                ),
+                (
+                    foreign_receiver,
+                    "GET",
+                    f"/shipyard/inbound/manifests/{manifest_id}/file",
+                ),
+                (
+                    foreign_receiver,
+                    "GET",
+                    f"/shipyard/photos/{receipt_photo_ids[0]}",
+                ),
+                (
+                    foreign_outbound,
+                    "GET",
+                    "/shipyard/outbound/formal-manifests?warehouse_id=1",
+                ),
+                (
+                    foreign_outbound,
+                    "GET",
+                    f"/shipyard/outbound/formal-manifests/{outbound_manifest_id}",
+                ),
+                (
+                    foreign_outbound,
+                    "GET",
+                    f"/shipyard/outbound/formal-manifests/{outbound_manifest_id}/file",
+                ),
+                (
+                    foreign_outbound,
+                    "GET",
+                    "/shipyard/outbound/orders?warehouse_id=1",
+                ),
+                (
+                    foreign_outbound,
+                    "GET",
+                    (
+                        f"/shipyard/outbound/orders/"
+                        f"{outbound_order['order']['outbound_order_id']}"
+                    ),
+                ),
+                (
+                    foreign_outbound,
+                    "GET",
+                    "/shipyard/outbound/mobile/orders?warehouse_id=1",
+                ),
+                (
+                    foreign_outbound,
+                    "GET",
+                    (
+                        f"/shipyard/outbound/mobile/orders/"
+                        f"{outbound_order['order']['outbound_order_id']}"
+                    ),
+                ),
+            ]
+            for foreign_session, method, path in foreign_resource_checks:
+                _json(
+                    foreign_session.request(
+                        method,
+                        f"{api_base}{path}",
+                        timeout=10,
+                    ),
+                    403,
+                )
             _json(
                 receiver_without_page.post(
                     f"{api_base}/shipyard/inbound/tickets/{uuid.uuid4()}"
@@ -869,7 +1090,7 @@ def run() -> dict:
                 ),
                 409,
             )
-            steps.append("缺托和复用照片被拦截；同键并发核销只扣库一次")
+            steps.append("缺托和复用照片被拦截；50 请求/10 并发核销只扣库一次")
 
             loading_key = f"loading-e2e-{run_id}"
             loading_payload = {
@@ -899,7 +1120,7 @@ def run() -> dict:
                 ),
                 409,
             )
-            steps.append("同键并发装车只写一次，整单进入 LOADED")
+            steps.append("50 请求/10 并发装车只写一次，整单进入 LOADED")
 
             refreshed_order = _json(
                 session.get(
@@ -941,6 +1162,11 @@ def run() -> dict:
             if evidence_summary != expected_database:
                 raise AssertionError(evidence_summary)
 
+            invariants = _database_invariants()
+            if not invariants["passed"]:
+                raise AssertionError(invariants)
+            steps.append("库存流水、照片/OCR 归属和单据状态不变量通过")
+
             return {
                 "status": "passed",
                 "api": api_base,
@@ -951,6 +1177,7 @@ def run() -> dict:
                 "on_hand_quantity": "0.000",
                 "confirmation_id": confirmed["confirmation"]["confirmation_id"],
                 "database": evidence_summary,
+                "invariants": invariants,
                 "ocr": "deterministic stub (no public credential configured)",
             }
     finally:

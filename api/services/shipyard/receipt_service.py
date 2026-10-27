@@ -13,6 +13,9 @@ from sqlalchemy import text
 from constants import (
     ACTION_SHIPYARD_SHORTAGE_UPDATED,
     ACTION_SHIPYARD_TICKET_RECEIVED,
+    SHIPYARD_LABEL_RECOGNITION_FAILED,
+    SHIPYARD_LABEL_RECOGNITION_MATCHED,
+    SHIPYARD_LABEL_RECOGNITION_NEEDS_REVIEW,
     SHIPYARD_LEDGER_RECEIPT,
     SHIPYARD_LINE_PARTIAL,
     SHIPYARD_LINE_PENDING,
@@ -727,7 +730,7 @@ def recognize_ticket_label_photo(
             task_id=None,
             warehouse_id=photo_result["warehouse_id"],
             result=None,
-            status="FAILED",
+            status=SHIPYARD_LABEL_RECOGNITION_FAILED,
             actor=uploaded_by,
             error_code=exc.code,
             error_message=exc.message,
@@ -789,7 +792,11 @@ def recognize_ticket_label_photo(
         )
         photo["tag_suffix"] = suffix
 
-    status = "MATCHED" if suffix and not mismatches else "NEEDS_REVIEW"
+    status = (
+        SHIPYARD_LABEL_RECOGNITION_MATCHED
+        if suffix and not mismatches
+        else SHIPYARD_LABEL_RECOGNITION_NEEDS_REVIEW
+    )
     recognition = save_label_recognition(
         db,
         photo_id=photo["photo_id"],
@@ -801,7 +808,7 @@ def recognize_ticket_label_photo(
         actor=uploaded_by,
     )
     return {
-        "matched": status == "MATCHED",
+        "matched": status == SHIPYARD_LABEL_RECOGNITION_MATCHED,
         "needs_suffix": suffix is None,
         "recognized": fields,
         "mismatches": mismatches,
@@ -1231,7 +1238,7 @@ def confirm_ticket_receipt(
                 photo_id=str(scan.photo_id),
                 for_update=True,
             )
-            if recognition.status == "FAILED":
+            if recognition.status == SHIPYARD_LABEL_RECOGNITION_FAILED:
                 raise PalletValidationError(
                     "吊牌 OCR 识别失败，请重新拍照",
                     {"recognition_id": str(recognition.recognition_id)},

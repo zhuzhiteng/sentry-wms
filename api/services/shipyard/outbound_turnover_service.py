@@ -14,6 +14,9 @@ from sqlalchemy import text
 from constants import (
     ACTION_SHIPYARD_OUTBOUND_LOADED,
     ACTION_SHIPYARD_TICKET_OUTBOUND,
+    SHIPYARD_LABEL_RECOGNITION_FAILED,
+    SHIPYARD_LABEL_RECOGNITION_MATCHED,
+    SHIPYARD_LABEL_RECOGNITION_NEEDS_REVIEW,
     SHIPYARD_LEDGER_OUTBOUND,
     SHIPYARD_OUTBOUND_LINE_ALLOCATED,
     SHIPYARD_OUTBOUND_LINE_OUTBOUND,
@@ -523,7 +526,7 @@ def recognize_outbound_label_photo(
             task_id=task_id,
             warehouse_id=context.warehouse_id,
             result=None,
-            status="FAILED",
+            status=SHIPYARD_LABEL_RECOGNITION_FAILED,
             actor=uploaded_by,
             error_code=exc.code,
             error_message=exc.message,
@@ -593,7 +596,11 @@ def recognize_outbound_label_photo(
     candidates = [
         item for item in candidates if item["task_id"] != str(context.task_id)
     ]
-    status = "MATCHED" if suffix and not mismatches else "NEEDS_REVIEW"
+    status = (
+        SHIPYARD_LABEL_RECOGNITION_MATCHED
+        if suffix and not mismatches
+        else SHIPYARD_LABEL_RECOGNITION_NEEDS_REVIEW
+    )
     recognition = save_label_recognition(
         db,
         photo_id=photo["photo_id"],
@@ -605,7 +612,7 @@ def recognize_outbound_label_photo(
         actor=uploaded_by,
     )
     return {
-        "matched": status == "MATCHED",
+        "matched": status == SHIPYARD_LABEL_RECOGNITION_MATCHED,
         "needs_suffix": suffix is None,
         "remaining_tag_suffixes": list(context.expected_tag_suffixes),
         "recognized": fields,
@@ -943,7 +950,7 @@ def confirm_outbound_task(
                 photo_id=str(scan.photo_id),
                 for_update=True,
             )
-            if recognition.status == "FAILED":
+            if recognition.status == SHIPYARD_LABEL_RECOGNITION_FAILED:
                 raise OutboundValidationError(
                     "吊牌 OCR 识别失败，请重新拍照",
                     {"tag_suffix": scan.tag_suffix},

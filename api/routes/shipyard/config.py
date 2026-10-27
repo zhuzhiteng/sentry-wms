@@ -21,6 +21,9 @@ from services.shipyard.config_service import (
     create_zone_ship_mapping as create_zone_ship_mapping_record,
 )
 from services.shipyard.config_service import (
+    get_zone_ship_mapping_warehouse_id,
+)
+from services.shipyard.config_service import (
     list_project_bindings as list_project_binding_records,
 )
 from services.shipyard.config_service import (
@@ -155,6 +158,13 @@ def create_zone_ship_mapping(validated):
 @validate_body(UpdateZoneShipMappingRequest)
 @with_db
 def update_zone_ship_mapping(mapping_id, validated):
+    warehouse_id = get_zone_ship_mapping_warehouse_id(
+        g.db,
+        mapping_id=mapping_id,
+    )
+    ok, denied = check_warehouse_access(warehouse_id)
+    if not ok:
+        return denied
     mapping = update_zone_ship_mapping_record(
         g.db,
         mapping_id=mapping_id,

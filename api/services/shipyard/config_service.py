@@ -354,6 +354,23 @@ def _mapping_by_id(db, mapping_id: int):
     ).fetchone()
 
 
+def get_zone_ship_mapping_warehouse_id(db, *, mapping_id: int) -> int:
+    row = db.execute(
+        text(
+            """
+            SELECT b.warehouse_id
+              FROM shipyard_zone_ship_mappings m
+              JOIN bins b ON b.bin_id = m.bin_id
+             WHERE m.mapping_id = :mapping_id
+            """
+        ),
+        {"mapping_id": mapping_id},
+    ).fetchone()
+    if row is None:
+        raise ShipyardNotFoundError("区域船号映射不存在")
+    return row.warehouse_id
+
+
 def create_zone_ship_mapping(db, *, validated, actor: str) -> dict[str, Any]:
     effective_from = validated.effective_from or datetime.now(UTC)
     if validated.effective_to is not None and validated.effective_to <= effective_from:
