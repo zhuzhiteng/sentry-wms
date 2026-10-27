@@ -137,7 +137,7 @@
 
 ## 验证
 
-- 全后端：`3042 passed, 55 skipped, 11 warnings`；
+- 全后端：`3043 passed, 55 skipped, 11 warnings`；
 - 吊牌 OCR 解析、provider 契约、收货/出库完整闭环共 8 项专项测试通过；
 - 管理端 32 个测试文件、203 项测试通过，生产构建通过；
 - 微信小程序 17 项 Node 测试通过；

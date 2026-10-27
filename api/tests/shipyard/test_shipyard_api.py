@@ -159,6 +159,8 @@ def test_mismatched_drawing_binding_blocks_confirmation(client, auth_headers):
         "MATCHED",
         "MISMATCH",
     ]
+    assert data["lines"][1]["binding"]["mismatched_fields"] == ["production_drawing_no"]
+    assert "制作图号" in data["lines"][1]["binding"]["message"]
 
 
 def test_adjacent_future_primary_zone_windows_are_schedulable(client, auth_headers):

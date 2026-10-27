@@ -258,7 +258,7 @@ HTTPS API 域名、微信 request/uploadFile 合法域名和真实 AppID。
 
 ## 验证
 
-- 全后端：`3042 passed, 55 skipped, 11 warnings`；
+- 全后端：`3043 passed, 55 skipped, 11 warnings`；
 - 087 迁移在 `sentry_test` 连续执行两次成功；
 - 全新空库执行 `db/schema.sql` 后，正式出库、任务、核销和装车 4 类核心表均存在；
 - 管理端：32 个测试文件、203 项测试通过，生产构建通过；
@@ -271,3 +271,7 @@ HTTPS API 域名、微信 request/uploadFile 合法域名和真实 AppID。
 核验物料编码/品名 → 扣减库存 → 整单装车。最终库存余额为 `0.000`、出库单为
 `LOADED`，每托照片和 OCR 记录一一绑定。OCR 调用使用固定结果，不等同于真实云
 OCR、小程序真机和现场吊牌 UAT。
+
+可重复的真实 HTTP E2E 由 `api/tests/e2e_shipyard_http.py` 执行。该脚本会启动
+本机回环 Flask 服务，完整走登录、配置、清单确认、两托 OCR 收货、缺后缀补选、
+整票扣库、装车、后台重新查询和原图字节校验；结束后恢复测试库种子数据。

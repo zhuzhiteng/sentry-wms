@@ -169,6 +169,30 @@ def test_formal_outbound_preview_requires_exact_material_identity(
     assert missing_code.status_code == 400
 
 
+def test_outbound_binding_mismatch_names_the_conflicting_field(
+    client,
+    auth_headers,
+):
+    ticket = _received_material_ticket(client, auth_headers)
+    preview = upload_outbound_manifest(
+        client,
+        auth_headers,
+        outbound_manifest_bytes(
+            ship_no=ticket["ship_no"],
+            manufacturer="另一个厂家",
+            material_code="MAT-001",
+            item_name="船用支架",
+            item_spec="S-100",
+        ),
+        file_name="wrong-manufacturer.xlsx",
+    )
+    assert preview.status_code == 201, preview.get_json()
+    line = preview.get_json()["lines"][0]
+    assert line["binding"]["status"] == "MISMATCH"
+    assert line["binding"]["mismatched_fields"] == ["manufacturer_name"]
+    assert "厂家" in line["binding"]["message"]
+
+
 def test_whole_ticket_outbound_photos_stock_and_loading(
     client,
     auth_headers,

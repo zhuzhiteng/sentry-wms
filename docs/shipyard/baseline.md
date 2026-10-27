@@ -55,11 +55,12 @@ Windows.
 Commands use a dedicated `sentry_test` database.
 
 ```text
-Backend: 3042 passed, 55 skipped, 11 warnings
+Backend: 3043 passed, 55 skipped, 11 warnings
 Admin:   32 test files passed, 203 tests passed
 Miniprogram: 17 tests passed
 Admin build: production build passed
 Schema:  087 applied twice to test; fresh db/schema.sql created
+HTTP E2E: passed (two-pallet OCR receipt → whole-ticket outbound → LOADED)
 ```
 
 The API test command must override the container's production environment:
@@ -72,6 +73,21 @@ docker compose exec -T `
   -e SENTRY_ALLOW_HTTP_WEBHOOKS=false `
   api python -m pytest tests/ -q
 ```
+
+The standalone HTTP E2E uses the same isolated `sentry_test` database and
+restores its seed data after the run:
+
+```powershell
+docker compose exec -T `
+  -e TEST_DATABASE_URL=$testDbUrl `
+  api python tests/e2e_shipyard_http.py
+```
+
+It starts a loopback Flask server, then performs login, binding/zone setup,
+inbound manifest confirmation, two OCR receipts, formal-outbound confirmation,
+two OCR scans with a missing-suffix recovery, stock depletion, loading
+confirmation, refreshed backend reads and photo-byte verification. OCR is a
+deterministic test stub because CI has no public-cloud credentials.
 
 The development override avoids production-only webhook SSRF startup guards.
 It does not disable authentication, tenant checks, or inventory locking.

@@ -41,6 +41,12 @@ from services.shipyard.errors import (
 )
 from services.shipyard.manifest_parser import parse_inbound_workbook
 
+_BINDING_FIELD_LABELS = {
+    "engineering_no": "工程号",
+    "production_drawing_no": "制作图号",
+    "manufacturer_name": "厂家",
+}
+
 
 def _iso(value: Any) -> str | None:
     if value is None:
@@ -61,6 +67,29 @@ def _decimal_text(value: Any) -> str:
 def _location_path(zone_code: Any, bin_code: Any) -> str:
     parts = [str(value).strip() for value in (zone_code, bin_code) if value]
     return " / ".join(dict.fromkeys(parts))
+
+
+def _normalized_text(value: Any) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _binding_conflicts(line, binding) -> list[dict[str, Any]]:
+    conflicts = []
+    for field, label in _BINDING_FIELD_LABELS.items():
+        manifest_value = getattr(line, field, None)
+        binding_value = getattr(binding, field, None)
+        if not manifest_value or not binding_value:
+            continue
+        if _normalized_text(manifest_value) != _normalized_text(binding_value):
+            conflicts.append(
+                {
+                    "field": field,
+                    "label": label,
+                    "manifest_value": str(manifest_value),
+                    "binding_value": str(binding_value),
+                }
+            )
+    return conflicts
 
 
 def _zone_rows_for_ships(db, warehouse_id: int, ship_nos: list[str]):
@@ -130,19 +159,11 @@ def _binding_status(line, bindings: dict[str, list[Any]]) -> dict[str, Any]:
         }
 
     matches = []
+    conflict_sets = {}
     for binding in candidates:
-        engineering_matches = not line.engineering_no or (
-            binding.engineering_no == line.engineering_no
-        )
-        drawing_matches = not line.production_drawing_no or (
-            binding.production_drawing_no == line.production_drawing_no
-        )
-        manufacturer_matches = (
-            not line.manufacturer_name
-            or not binding.manufacturer_name
-            or binding.manufacturer_name == line.manufacturer_name
-        )
-        if engineering_matches and drawing_matches and manufacturer_matches:
+        conflicts = _binding_conflicts(line, binding)
+        conflict_sets[binding.binding_id] = conflicts
+        if not conflicts:
             matches.append(binding)
 
     if len(matches) == 1:
@@ -156,9 +177,20 @@ def _binding_status(line, bindings: dict[str, list[Any]]) -> dict[str, Any]:
             "message": "清单字段匹配到多条船号绑定",
             "binding_ids": [binding.binding_id for binding in matches],
         }
+    closest = min(
+        candidates, key=lambda binding: len(conflict_sets[binding.binding_id])
+    )
+    conflicts = conflict_sets[closest.binding_id]
+    labels = [item["label"] for item in conflicts]
     return {
         "status": SHIPYARD_BINDING_MISMATCH,
-        "message": "清单字段与现有绑定不一致",
+        "message": (
+            f"项目绑定字段不一致：{'、'.join(labels)}"
+            if labels
+            else "清单字段与现有绑定不一致"
+        ),
+        "mismatched_fields": [item["field"] for item in conflicts],
+        "binding_conflicts": conflicts,
     }
 
 
