@@ -1,5 +1,6 @@
 """Request schemas for the shipyard warehouse domain."""
 
+from datetime import date
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
@@ -7,6 +8,9 @@ from uuid import UUID
 from pydantic import AwareDatetime, BaseModel, Field, field_validator
 
 from constants import (
+    SHIPYARD_DISPATCH_SOURCE_EXCEL,
+    SHIPYARD_DISPATCH_SOURCE_IMAGE_OCR,
+    SHIPYARD_DISPATCH_SOURCE_MANUAL,
     SHIPYARD_SHORTAGE_IN_TRANSIT,
     SHIPYARD_SHORTAGE_REPORTED,
     SHIPYARD_STATUS_ACTIVE,
@@ -226,4 +230,96 @@ class ShortageReportRequest(BaseModel):
     @field_validator("note")
     @classmethod
     def strip_shortage_note(cls, value: str) -> str:
+        return _strip_required_text(value)
+
+
+class ConfirmDistributionImportRequest(BaseModel):
+    """Distribution imports intentionally carry no editable rows on confirm."""
+
+
+class VoidDistributionImportRequest(VoidInboundManifestRequest):
+    """Reason required when voiding a distribution-demand import."""
+
+
+class DispatchLineRequest(BaseModel):
+    line_no: str = Field(..., min_length=1, max_length=32)
+    engineering_no: str = Field(..., min_length=1, max_length=64)
+    pallet_no: str = Field(..., min_length=1, max_length=128)
+    material_spec_raw: str = Field(..., min_length=1, max_length=2000)
+    material_code: str | None = Field(None, max_length=128)
+    material_name: str | None = Field(None, max_length=255)
+    specification: str | None = Field(None, max_length=2000)
+    quantity: Decimal = Field(
+        ...,
+        gt=0,
+        max_digits=18,
+        decimal_places=3,
+    )
+    unit: str = Field(..., min_length=1, max_length=32)
+    expected_arrival_date: date | None = None
+    keeper_name: str | None = Field(None, max_length=100)
+    keeper_phone: str | None = Field(None, max_length=50)
+    remarks: str | None = Field(None, max_length=500)
+    demand_line_id: UUID | None = None
+
+    @field_validator(
+        "line_no",
+        "engineering_no",
+        "pallet_no",
+        "material_spec_raw",
+        "unit",
+    )
+    @classmethod
+    def strip_required_dispatch_fields(cls, value: str) -> str:
+        return _strip_required_text(value)
+
+    @field_validator(
+        "material_code",
+        "material_name",
+        "specification",
+        "keeper_name",
+        "keeper_phone",
+        "remarks",
+    )
+    @classmethod
+    def strip_optional_dispatch_fields(cls, value: str | None) -> str | None:
+        return _strip_text(value) or None
+
+
+class CreateDispatchRequest(BaseModel):
+    warehouse_id: int = Field(..., gt=0)
+    dispatch_no: str = Field(..., min_length=1, max_length=128)
+    dispatch_date: date
+    source_type: Literal[
+        SHIPYARD_DISPATCH_SOURCE_MANUAL,
+        SHIPYARD_DISPATCH_SOURCE_EXCEL,
+        SHIPYARD_DISPATCH_SOURCE_IMAGE_OCR,
+    ] = SHIPYARD_DISPATCH_SOURCE_MANUAL
+    source_file_name: str | None = Field(None, max_length=255)
+    idempotency_key: str = Field(..., min_length=8, max_length=128)
+    lines: list[DispatchLineRequest] = Field(..., min_length=1, max_length=200)
+
+    @field_validator("dispatch_no", "idempotency_key")
+    @classmethod
+    def strip_required_dispatch_document_fields(cls, value: str) -> str:
+        return _strip_required_text(value)
+
+    @field_validator("source_file_name")
+    @classmethod
+    def strip_optional_dispatch_source(cls, value: str | None) -> str | None:
+        return _strip_text(value) or None
+
+
+class MatchDispatchLineRequest(BaseModel):
+    demand_line_id: UUID
+
+
+class CreateDeliveryNoteRequest(BaseModel):
+    delivery_note_no: str = Field(..., min_length=1, max_length=128)
+    issue_date: date
+    idempotency_key: str = Field(..., min_length=8, max_length=128)
+
+    @field_validator("delivery_note_no", "idempotency_key")
+    @classmethod
+    def strip_required_delivery_fields(cls, value: str) -> str:
         return _strip_required_text(value)

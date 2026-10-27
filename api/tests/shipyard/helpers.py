@@ -104,6 +104,132 @@ def manifest_bytes_without_drawing(ship_no, manufacturer="测试船舶配件有�
     )
 
 
+def distribution_demand_bytes():
+    return workbook_bytes(
+        [
+            [
+                "工程号",
+                "分段号",
+                "托盘号",
+                "托盘名称",
+                "工单状态",
+                None,
+                "申请人",
+                "部门",
+                "配送地址",
+                "联系人",
+                "手机号",
+                "需求时间",
+                "配送资源1",
+                "配送员1",
+                "配送资源2",
+                "配送员2",
+                "配送资源3",
+                "配送员3",
+                "确认人",
+                "完成时间",
+                "确认状态",
+            ],
+            [
+                "H1632",
+                "106",
+                "106FE120121",
+                "106分段电舾装件安装托盘表(B)",
+                "已完成",
+                "未到",
+                "测试申请人(10001)",
+                "总装一部>分段舾装作业区",
+                "5号风雨棚",
+                "测试申请人",
+                "13800000001",
+                "2026-10-26 10:30:00~2026-10-26 11:00:00",
+                "5T叉车",
+                "测试配送员A",
+                None,
+                None,
+                None,
+                None,
+                None,
+                "2026-10-24 14:10:40",
+                None,
+            ],
+            [
+                "H1632",
+                "106",
+                "106FP120141",
+                "106分段管支架安装托盘表(B)",
+                "已完成",
+                "未到",
+                "测试申请人(10001)",
+                "总装一部>分段舾装作业区",
+                "5号风雨棚",
+                "测试申请人",
+                "13800000001",
+                "2026-10-26 10:30:00~2026-10-26 11:00:00",
+                "5T叉车",
+                "测试配送员A",
+                None,
+                None,
+                None,
+                None,
+                None,
+                "2026-10-24 14:10:40",
+                None,
+            ],
+            [
+                "H1617",
+                "172",
+                "172FE120121",
+                "172分段电舾件安装托盘表(B)",
+                "已完成",
+                "未到",
+                "测试申请人(10002)",
+                "总装一部>分段舾装作业区",
+                "18号风雨棚",
+                "测试申请人",
+                "13800000002",
+                "2026-10-26 10:00:00~2026-10-26 10:30:00",
+                "5T叉车",
+                "测试配送员B",
+                None,
+                None,
+                None,
+                None,
+                None,
+                "2026-10-26 09:30:00",
+                None,
+            ],
+        ]
+    )
+
+
+def dispatch_line_payload(
+    *,
+    line_no="1",
+    engineering_no="H1404",
+    pallet_no="E063-4002(1008)",
+    material_spec_raw="E063-4002(1008) 0083-85 电舾件",
+    quantity=4,
+    demand_line_id=None,
+):
+    return {
+        "line_no": line_no,
+        "engineering_no": engineering_no,
+        "pallet_no": pallet_no,
+        "material_spec_raw": material_spec_raw,
+        "material_code": None,
+        "material_name": "电舾件",
+        "specification": "0083-85",
+        "quantity": quantity,
+        "unit": "件",
+        "expected_arrival_date": "2026-10-28",
+        "keeper_name": "测试保管员",
+        "keeper_phone": "13800000003",
+        "remarks": "0#平台",
+        "demand_line_id": demand_line_id,
+    }
+
+
 def first_bin():
     conn = get_raw_connection()
     cur = conn.cursor()
@@ -165,6 +291,25 @@ def upload_manifest(
             "warehouse_id": "1",
             "manifest_no": manifest_no,
             "file": (BytesIO(content), "外高桥发货清单.xlsx"),
+        },
+        content_type="multipart/form-data",
+        headers=headers,
+    )
+
+
+def upload_distribution_import(
+    client,
+    headers,
+    content,
+    *,
+    file_name="distribution-demand.xlsx",
+    warehouse_id=1,
+):
+    return client.post(
+        "/api/shipyard/outbound/distribution-imports/preview",
+        data={
+            "warehouse_id": str(warehouse_id),
+            "file": (BytesIO(content), file_name),
         },
         content_type="multipart/form-data",
         headers=headers,

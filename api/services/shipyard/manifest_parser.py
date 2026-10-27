@@ -18,16 +18,16 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from typing import Any
-from zipfile import BadZipFile, ZipFile
+from zipfile import BadZipFile
 
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
+from services.shipyard.xlsx_security import XlsxSecurityError, validate_xlsx_archive
+
 MAX_SCAN_ROWS = 5000
 MAX_TEMPLATE_COLUMNS = 64
 HEADER_SEARCH_ROWS = 30
-MAX_ARCHIVE_ENTRIES = 2000
-MAX_UNCOMPRESSED_ARCHIVE_BYTES = 50 * 1024 * 1024
 
 HEADER_ALIASES = {
     "source_row_no": ("序号", "清单序号", "行号"),
@@ -245,29 +245,6 @@ def _row_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _validate_xlsx_archive(content: bytes) -> None:
-    try:
-        with ZipFile(BytesIO(content)) as archive:
-            entries = archive.infolist()
-            if len(entries) > MAX_ARCHIVE_ENTRIES:
-                raise ManifestParseError(
-                    "Excel 文件包含过多内部文件，拒绝解析",
-                    [{"code": "XLSX_TOO_MANY_ENTRIES"}],
-                )
-            if (
-                sum(entry.file_size for entry in entries)
-                > MAX_UNCOMPRESSED_ARCHIVE_BYTES
-            ):
-                raise ManifestParseError(
-                    "Excel 解压后体积过大，拒绝解析",
-                    [{"code": "XLSX_UNCOMPRESSED_TOO_LARGE"}],
-                )
-    except BadZipFile as exc:
-        raise ManifestParseError(
-            "无法读取 Excel 文件，请确认文件为有效的 .xlsx 文件"
-        ) from exc
-
-
 def _parse_business_row(
     *,
     excel_row: int,
@@ -419,7 +396,13 @@ def parse_inbound_workbook(
 ) -> ParsedInboundWorkbook:
     if not content:
         raise ManifestParseError("上传文件为空")
-    _validate_xlsx_archive(content)
+    try:
+        validate_xlsx_archive(content)
+    except XlsxSecurityError as exc:
+        raise ManifestParseError(
+            str(exc),
+            [{"code": exc.code}],
+        ) from exc
     try:
         workbook = load_workbook(
             BytesIO(content),

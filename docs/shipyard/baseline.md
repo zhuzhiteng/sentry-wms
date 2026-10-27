@@ -55,7 +55,7 @@ Windows.
 Commands use a dedicated `sentry_test` database.
 
 ```text
-Backend: 3000 passed, 55 skipped, 11 warnings in 326.77s
+Backend: 3016 passed, 55 skipped, 11 warnings in 331.53s
 Admin:   30 test files passed, 193 tests passed
 Build:   API, workers, dispatcher, and admin images built successfully
 Health:  GET /api/health -> {"service":"sentry-wms","status":"ok"}
@@ -98,10 +98,17 @@ configuration, fixed-template inbound manifest parsing, source-file retention,
 binding enforcement, manifest void/reimport, and one cargo ticket per source
 row.
 
-The second slice is now implemented as a separate ticket-level stock ledger:
+The second slice is implemented as a separate ticket-level stock ledger:
 local QR/barcode input, server-side label validation, per-pallet photo evidence,
 actual quantity receipt, shortage reporting, replenishment and idempotent
-confirmation. The next slice is shipyard outbound-manifest recognition, whole
-ticket scan depletion and loading confirmation. Generic Sentry `items` /
-`inventory` synchronization remains deferred until the shipyard material-code
-mapping is agreed.
+confirmation.
+
+The third slice adds shipyard distribution-demand Excel recognition,
+warehouse-scoped dispatch matching, source-line lineage and printable front
+warehouse delivery notes. `085_shipyard_outbound_documents.sql` is idempotent
+and the consolidated `db/schema.sql` contains the same final structures.
+
+The next slice is shipyard outbound-manifest recognition, whole-ticket scan
+depletion and loading confirmation. Generic Sentry `items` / `inventory`
+synchronization remains deferred until the shipyard material-code mapping is
+agreed.

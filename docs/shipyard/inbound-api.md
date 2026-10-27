@@ -6,6 +6,9 @@ Sentry WMS 的账号、仓库授权、审计日志和数据库事务。
 第二切片“扫码收货、照片证据、少件补货”见
 [`receipt-api.md`](receipt-api.md)。
 
+第三切片“配送需求识别、派工单、发货单和打印”见
+[`outbound-documents-api.md`](outbound-documents-api.md)。
+
 ## 已实现范围
 
 ### 船号/工程号/制作图绑定
