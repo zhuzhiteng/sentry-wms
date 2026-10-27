@@ -82,13 +82,24 @@ def single_line_manifest_bytes(
     quantity=4,
     drawing="D-001",
     manufacturer="测试船舶配件有限公司",
+    material_code=None,
+    item_name="舾装件",
+    item_spec=None,
 ):
+    headers = ["序号", "船号", "品名", "图号", "图名", "件数"]
+    values = ["1", ship_no, item_name, drawing, "制作图A", quantity]
+    if material_code is not None:
+        headers.insert(3, "物料编码")
+        values.insert(3, material_code)
+    if item_spec is not None:
+        headers.insert(-1, "型号规格")
+        values.insert(-1, item_spec)
     return workbook_bytes(
         [
             [manufacturer],
             ["2026舾装件发货清单"],
-            ["序号", "船号", "品名", "图号", "图名", "件数"],
-            ["1", ship_no, "舾装件", drawing, "制作图A", quantity],
+            headers,
+            values,
         ]
     )
 
@@ -228,6 +239,61 @@ def dispatch_line_payload(
         "remarks": "0#平台",
         "demand_line_id": demand_line_id,
     }
+
+
+def outbound_manifest_bytes(
+    *,
+    factory_shipment_no="CX-20261027-001",
+    ship_no="H9301",
+    engineering_no=None,
+    drawing="D-001",
+    manufacturer="测试船舶配件有限公司",
+    material_code="MAT-001",
+    item_name="船用支架",
+    item_spec="S-100",
+    demand_quantity=4,
+    expected_pallet_count=2,
+    suffixes="1-1、1-2",
+):
+    return workbook_bytes(
+        [
+            ["外高桥船厂正式出库清单"],
+            [
+                "清单行号",
+                "船厂出货单号",
+                "托组号",
+                "船号",
+                "工程号",
+                "制作图号",
+                "厂家",
+                "物料编码",
+                "物料名称",
+                "规格型号",
+                "需求数量",
+                "单位",
+                "需求日期",
+                "预计托盘数",
+                "托盘后缀",
+            ],
+            [
+                "1",
+                factory_shipment_no,
+                "T930101",
+                ship_no,
+                engineering_no or ship_no,
+                drawing,
+                manufacturer,
+                material_code,
+                item_name,
+                item_spec,
+                demand_quantity,
+                "件",
+                "2026-10-27",
+                expected_pallet_count,
+                suffixes,
+            ],
+        ]
+    )
 
 
 def first_bin():
@@ -392,6 +458,7 @@ def pallet_payload(
     drawing="D-001",
     qr_payload=None,
     label_quantity=4,
+    batch_no=None,
 ):
     return {
         "tag_suffix": tag_suffix,
@@ -400,11 +467,75 @@ def pallet_payload(
         "engineering_no": engineering_no or ship_no,
         "production_drawing_no": drawing,
         "qr_pallet_no": drawing,
-        "batch_no": f"{ship_no}-BATCH-1",
+        "batch_no": batch_no or f"{ship_no}-BATCH-1",
         "manufacturer_name": "测试船舶配件有限公司",
         "installation_pallet_no": f"INSTALL-{tag_suffix or 'single'}",
         "installation_pallet_name": "制作图A",
         "destination": "外高桥",
+        "label_quantity": label_quantity,
+        "photo_id": photo_id,
+    }
+
+
+def upload_outbound_manifest(
+    client,
+    headers,
+    content,
+    *,
+    file_name="shipyard-outbound.xlsx",
+    warehouse_id=1,
+):
+    return client.post(
+        "/api/shipyard/outbound/formal-manifests/preview",
+        data={
+            "warehouse_id": str(warehouse_id),
+            "file": (BytesIO(content), file_name),
+        },
+        content_type="multipart/form-data",
+        headers=headers,
+    )
+
+
+def upload_outbound_photo(
+    client,
+    headers,
+    task_id,
+    *,
+    tag_suffix,
+    content=PNG_BYTES,
+    file_name="outbound-pallet.png",
+):
+    return client.post(
+        f"/api/shipyard/outbound/tasks/{task_id}/photos",
+        data={
+            "tag_suffix": tag_suffix,
+            "file": (BytesIO(content), file_name),
+        },
+        content_type="multipart/form-data",
+        headers=headers,
+    )
+
+
+def outbound_scan_payload(
+    task,
+    suffix,
+    *,
+    qr_payload,
+    photo_id,
+    material_code=None,
+    item_name=None,
+    batch_no=None,
+    label_quantity=None,
+):
+    return {
+        "tag_suffix": suffix,
+        "qr_payload": qr_payload,
+        "ship_no": task["ship_no"],
+        "engineering_no": task["engineering_no"],
+        "production_drawing_no": task["production_drawing_no"],
+        "material_code": material_code or task["material_code"],
+        "item_name": item_name or task["item_name"],
+        "batch_no": batch_no,
         "label_quantity": label_quantity,
         "photo_id": photo_id,
     }

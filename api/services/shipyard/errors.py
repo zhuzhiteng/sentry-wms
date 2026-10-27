@@ -126,3 +126,32 @@ class DeliveryNoteStateError(ShipyardStateError):
 class DispatchMatchError(ShipyardValidationError):
     code = "dispatch_match_failed"
     status_code = 422
+
+
+class OutboundManifestNotFoundError(ShipyardNotFoundError):
+    code = "outbound_manifest_not_found"
+
+
+class OutboundManifestStateError(ShipyardStateError):
+    code = "outbound_manifest_state_conflict"
+
+
+class DuplicateOutboundManifestFileError(ShipyardConflictError):
+    code = "duplicate_outbound_manifest_file"
+
+
+class OutboundOrderNotFoundError(ShipyardNotFoundError):
+    code = "outbound_order_not_found"
+
+
+class OutboundTaskNotFoundError(ShipyardNotFoundError):
+    code = "outbound_task_not_found"
+
+
+class OutboundStateError(ShipyardStateError):
+    code = "outbound_state_conflict"
+
+
+class OutboundValidationError(ShipyardValidationError):
+    code = "outbound_validation_failed"
+    status_code = 422

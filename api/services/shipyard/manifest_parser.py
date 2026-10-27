@@ -33,6 +33,7 @@ HEADER_ALIASES = {
     "source_row_no": ("序号", "清单序号", "行号"),
     "ship_no": ("船号",),
     "engineering_no": ("工程号", "项目号"),
+    "material_code": ("物料编码", "物资编码", "物料代码", "物资代码"),
     "item_name": ("品名", "物料名称", "物资名称"),
     "production_drawing_no": ("图号", "制作图编号", "制作图号"),
     "drawing_name": ("图名", "制作图名称", "安装托盘名称"),
@@ -58,6 +59,7 @@ class ParsedInboundLine:
     production_drawing_no: str
     drawing_name: str | None
     manufacturer_name: str
+    material_code: str | None
     delivery_note_no: str | None
     po_no: str | None
     item_name: str
@@ -346,6 +348,7 @@ def _parse_business_row(
         production_drawing_no=drawing_no or "",
         drawing_name=drawing_name,
         manufacturer_name=manufacturer_name,
+        material_code=_to_text(_cell(values, mapping.get("material_code"))),
         delivery_note_no=_to_text(_cell(values, mapping.get("delivery_note_no"))),
         po_no=(
             _to_text(_cell(values, mapping.get("po_no")))

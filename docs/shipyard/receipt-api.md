@@ -153,8 +153,8 @@
   船厂物料编码和通用物料主数据映射，不能按品名静默创建 SKU。
 - 配送需求、派工单、发货单和打印已由第三切片实现，见
   [`outbound-documents-api.md`](outbound-documents-api.md)。
-- 船厂正式出库清单识别、整票扫码扣库、出库照片和装车确认仍属于下一功能
-  切片。
+- 正式出库清单识别、整票多吊牌扫码、照片留证、库存扣减和装车确认见
+  [`formal-outbound-api.md`](formal-outbound-api.md)。
 
 ## 验证
 

@@ -184,7 +184,7 @@ def _manifest_lines(db, manifest_id: str):
             """
             SELECT line_id, source_row_no, source_row_hash, ship_no,
                    engineering_no, production_drawing_no, drawing_name,
-                   manufacturer_name, delivery_note_no, po_no,
+                   manufacturer_name, material_code, delivery_note_no, po_no,
                    item_name, item_spec, unit, declared_quantity,
                    assigned_bin_id, raw_data, status, created_at, updated_at
               FROM shipyard_inbound_lines
@@ -233,6 +233,7 @@ def get_manifest_payload(db, manifest_id: str) -> dict[str, Any]:
                 "production_drawing_no": line.production_drawing_no,
                 "drawing_name": line.drawing_name,
                 "manufacturer_name": line.manufacturer_name,
+                "material_code": line.material_code,
                 "delivery_note_no": line.delivery_note_no,
                 "po_no": line.po_no,
                 "item_name": line.item_name,
@@ -541,12 +542,14 @@ def create_manifest_preview(
                 INSERT INTO shipyard_inbound_lines
                     (manifest_id, source_row_no, source_row_hash, ship_no,
                      engineering_no, production_drawing_no, drawing_name,
-                     manufacturer_name, delivery_note_no, po_no, item_name,
+                     manufacturer_name, material_code, delivery_note_no, po_no,
+                     item_name,
                      item_spec, unit, declared_quantity, raw_data, status)
                 VALUES
                     (:manifest_id, :source_row_no, :source_row_hash, :ship_no,
                      :engineering_no, :production_drawing_no, :drawing_name,
-                     :manufacturer_name, :delivery_note_no, :po_no, :item_name,
+                     :manufacturer_name, :material_code, :delivery_note_no,
+                     :po_no, :item_name,
                      :item_spec, :unit, :declared_quantity, :raw_data,
                      :pending_status)
                 """
@@ -560,6 +563,7 @@ def create_manifest_preview(
                 "production_drawing_no": line.production_drawing_no,
                 "drawing_name": line.drawing_name,
                 "manufacturer_name": line.manufacturer_name,
+                "material_code": line.material_code,
                 "delivery_note_no": line.delivery_note_no,
                 "po_no": line.po_no,
                 "item_name": line.item_name,

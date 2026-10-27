@@ -113,7 +113,7 @@ def _ticket_context(db, ticket_id: str, *, for_update: bool = False):
                t.shortage_note,
                l.line_id, l.source_row_no, l.ship_no,
                l.engineering_no, l.production_drawing_no,
-               l.drawing_name, l.manufacturer_name, l.item_name,
+               l.drawing_name, l.manufacturer_name, l.material_code, l.item_name,
                l.item_spec, l.unit, l.project_binding_id,
                m.manifest_id, m.manifest_no, m.warehouse_id,
                m.status AS manifest_status,
@@ -492,6 +492,7 @@ def _ticket_payload(context) -> dict[str, Any]:
         "production_drawing_no": context.expected_production_drawing_no,
         "drawing_name": context.drawing_name,
         "manufacturer_name": context.expected_manufacturer_name,
+        "material_code": context.material_code,
         "item_name": context.item_name,
         "item_spec": context.item_spec,
         "unit": context.unit,
@@ -858,7 +859,7 @@ def _receipt_summary(db, receipt_id: str) -> dict[str, Any]:
                          FROM shipyard_pallet_units p
                         WHERE p.ticket_id = t.ticket_id
                    ) AS pallet_count,
-                   l.manifest_id, l.source_row_no, l.item_name,
+                   l.manifest_id, l.source_row_no, l.material_code, l.item_name,
                    l.ship_no, l.production_drawing_no
               FROM shipyard_receipts r
               JOIN shipyard_cargo_tickets t ON t.ticket_id = r.ticket_id
@@ -935,6 +936,7 @@ def _receipt_summary(db, receipt_id: str) -> dict[str, Any]:
             "source_row_no": receipt.source_row_no,
             "ship_no": receipt.ship_no,
             "production_drawing_no": receipt.production_drawing_no,
+            "material_code": receipt.material_code,
             "item_name": receipt.item_name,
             "declared_quantity": _decimal_text(receipt.declared_quantity),
             "received_quantity": _decimal_text(receipt.cumulative_received_quantity),

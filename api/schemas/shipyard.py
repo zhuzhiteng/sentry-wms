@@ -323,3 +323,81 @@ class CreateDeliveryNoteRequest(BaseModel):
     @classmethod
     def strip_required_delivery_fields(cls, value: str) -> str:
         return _strip_required_text(value)
+
+
+class ConfirmOutboundManifestRequest(BaseModel):
+    """Confirmation uses the server-side allocation preview."""
+
+
+class OutboundPalletScanRequest(BaseModel):
+    tag_suffix: str = Field(..., pattern=r"^[1-9][0-9]*-[1-9][0-9]*$")
+    qr_payload: str = Field(..., min_length=1, max_length=4096)
+    ship_no: str | None = Field(None, max_length=64)
+    engineering_no: str | None = Field(None, max_length=64)
+    production_drawing_no: str | None = Field(None, max_length=128)
+    material_code: str | None = Field(None, max_length=128)
+    item_name: str | None = Field(None, max_length=255)
+    batch_no: str | None = Field(None, max_length=128)
+    label_quantity: Decimal | None = Field(
+        None,
+        gt=0,
+        max_digits=18,
+        decimal_places=3,
+    )
+
+    @field_validator("tag_suffix", "qr_payload")
+    @classmethod
+    def strip_outbound_scan_required(cls, value: str) -> str:
+        return _strip_required_text(value)
+
+    @field_validator(
+        "ship_no",
+        "engineering_no",
+        "production_drawing_no",
+        "material_code",
+        "item_name",
+        "batch_no",
+    )
+    @classmethod
+    def strip_outbound_scan_optional(cls, value: str | None) -> str | None:
+        return _strip_text(value) or None
+
+
+class OutboundPalletEvidenceRequest(OutboundPalletScanRequest):
+    photo_id: UUID
+
+
+class ConfirmOutboundTaskRequest(BaseModel):
+    idempotency_key: str = Field(..., min_length=8, max_length=128)
+    client_device_id: str | None = Field(None, max_length=128)
+    pallets: list[OutboundPalletEvidenceRequest] = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+    )
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def strip_outbound_idempotency_key(cls, value: str) -> str:
+        return _strip_required_text(value)
+
+    @field_validator("client_device_id")
+    @classmethod
+    def strip_outbound_client_device(cls, value: str | None) -> str | None:
+        return _strip_text(value) or None
+
+
+class ConfirmOutboundLoadingRequest(BaseModel):
+    idempotency_key: str = Field(..., min_length=8, max_length=128)
+    client_device_id: str | None = Field(None, max_length=128)
+    notes: str | None = Field(None, max_length=500)
+
+    @field_validator("idempotency_key", mode="before")
+    @classmethod
+    def strip_loading_idempotency_key(cls, value: str) -> str:
+        return _strip_required_text(value)
+
+    @field_validator("client_device_id", "notes")
+    @classmethod
+    def strip_loading_optional(cls, value: str | None) -> str | None:
+        return _strip_text(value) or None

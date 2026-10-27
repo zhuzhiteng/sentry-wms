@@ -73,4 +73,10 @@ def _database_error(exc):
     return jsonify({"error": "shipyard_database_unavailable"}), 503
 
 
-from routes.shipyard import config, inbound, outbound, receipts  # noqa: E402, F401
+from routes.shipyard import (  # noqa: F401
+    config,
+    formal_outbound,
+    inbound,
+    outbound,
+    receipts,
+)

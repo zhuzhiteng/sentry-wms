@@ -55,11 +55,11 @@ Windows.
 Commands use a dedicated `sentry_test` database.
 
 ```text
-Backend: 3016 passed, 55 skipped, 11 warnings in 331.53s
-Admin:   32 test files passed, 199 tests passed
-Build:   API, workers, dispatcher, and admin images built successfully
-Health:  GET /api/health -> {"service":"sentry-wms","status":"ok"}
-Admin:   GET / -> HTTP 200
+Backend: 3031 passed, 55 skipped, 11 warnings in 332.82s
+Admin:   32 test files passed, 200 tests passed
+Miniprogram: 8 tests passed
+Admin build: production build passed
+Schema:  086 applied twice to dev/test; fresh db/schema.sql created
 ```
 
 The API test command must override the container's production environment:
@@ -83,10 +83,10 @@ PyJWT to 2.15.0, and refreshed the remaining locked transitive packages.
 
 - `pip-audit`: no known vulnerabilities;
 - `npm audit`: 0 vulnerabilities;
-- admin test suite: 30 files and 193 tests passed;
+- admin test suite: 32 files and 200 tests passed;
 - admin production build: passed;
-- admin lint still reports 62 errors and 13 warnings after removing two
-  unused variables in touched files.
+- the files touched by the shipyard outbound slice pass ESLint; the repository
+  still carries pre-existing lint debt outside this slice.
 
 The admin lint debt is not introduced by the shipyard domain and must not be
 described as clean until it is reduced and re-verified.
@@ -116,7 +116,11 @@ read-only auditor, with development-only virtual user seeding. The React admin
 exposes `/shipyard-settings` for ship/project bindings and zone-to-ship
 placement rules.
 
-The next slice is shipyard outbound-manifest recognition, whole-ticket scan
-depletion and loading confirmation. Generic Sentry `items` / `inventory`
+The fourth shipyard slice adds formal outbound-manifest recognition, exact
+material-code/item/spec stock matching, whole-ticket multi-label scans,
+per-pallet outbound photo evidence, one-time stock depletion, loading
+confirmation and a native WeChat mini-program for receiving and outbound work.
+Migration `086_shipyard_formal_outbound.sql` is idempotent and the consolidated
+schema contains the same structures. Generic Sentry `items` / `inventory`
 synchronization remains deferred until the shipyard material-code mapping is
 agreed.
