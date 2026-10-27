@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from flask import g, jsonify, request
-from sqlalchemy.exc import IntegrityError
+from io import BytesIO
+
+from flask import g, jsonify, request, send_file
 
 from middleware.auth_middleware import (
     check_warehouse_access,
@@ -11,26 +12,22 @@ from middleware.auth_middleware import (
     require_auth,
 )
 from middleware.db import with_db
-from schemas.shipyard import ConfirmInboundManifestRequest
+from schemas.shipyard import (
+    ConfirmInboundManifestRequest,
+    VoidInboundManifestRequest,
+)
 from services.shipyard.manifest_parser import ManifestParseError
 from services.shipyard.manifest_service import (
-    ShipyardServiceError,
     confirm_manifest,
     create_manifest_preview,
+    get_manifest_file,
     get_manifest_payload,
     list_manifests,
+    void_manifest,
 )
 from utils.validation import validate_body
+
 from . import shipyard_bp
-
-
-def _service_error(exc: ShipyardServiceError):
-    body = {
-        "error": exc.code,
-        "message": exc.message,
-    }
-    body.update(exc.details)
-    return jsonify(body), exc.status_code
 
 
 def _safe_file_name(raw_name: str) -> str:
@@ -51,12 +48,7 @@ def get_inbound_manifests():
     ok, denied = check_warehouse_access(warehouse_id)
     if not ok:
         return denied
-    try:
-        return jsonify(
-            list_manifests(g.db, warehouse_id=warehouse_id, limit=limit)
-        )
-    except ShipyardServiceError as exc:
-        return _service_error(exc)
+    return jsonify(list_manifests(g.db, warehouse_id=warehouse_id, limit=limit))
 
 
 @shipyard_bp.post("/inbound/manifests/preview")
@@ -101,6 +93,8 @@ def preview_inbound_manifest():
             warehouse_id=warehouse_id,
             manifest_no=request.form.get("manifest_no"),
             source_file_name=source_file_name,
+            content_type=uploaded.mimetype
+            or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             content=content,
             manufacturer_name=request.form.get("manufacturer_name"),
             created_by=g.current_user["username"],
@@ -113,11 +107,6 @@ def preview_inbound_manifest():
                 "diagnostics": exc.diagnostics,
             }
         ), 422
-    except ShipyardServiceError as exc:
-        return _service_error(exc)
-    except IntegrityError:
-        g.db.rollback()
-        return jsonify({"error": "manifest_conflict"}), 409
     return jsonify(payload), 201
 
 
@@ -126,14 +115,29 @@ def preview_inbound_manifest():
 @require_admin_or_page_permission("inbound")
 @with_db
 def get_inbound_manifest(manifest_id):
-    try:
-        payload = get_manifest_payload(g.db, str(manifest_id))
-    except ShipyardServiceError as exc:
-        return _service_error(exc)
+    payload = get_manifest_payload(g.db, str(manifest_id))
     ok, denied = check_warehouse_access(payload["manifest"]["warehouse_id"])
     if not ok:
         return denied
     return jsonify(payload)
+
+
+@shipyard_bp.get("/inbound/manifests/<uuid:manifest_id>/file")
+@require_auth
+@require_admin_or_page_permission("inbound")
+@with_db
+def download_inbound_manifest_file(manifest_id):
+    manifest_file = get_manifest_file(g.db, manifest_id=str(manifest_id))
+    ok, denied = check_warehouse_access(manifest_file["warehouse_id"])
+    if not ok:
+        return denied
+    return send_file(
+        BytesIO(manifest_file["file_bytes"]),
+        mimetype=manifest_file["content_type"],
+        as_attachment=True,
+        download_name=manifest_file["file_name"],
+        max_age=0,
+    )
 
 
 @shipyard_bp.post("/inbound/manifests/<uuid:manifest_id>/confirm")
@@ -143,19 +147,32 @@ def get_inbound_manifest(manifest_id):
 @with_db
 def confirm_inbound_manifest(manifest_id, validated):
     del validated
-    try:
-        current = get_manifest_payload(g.db, str(manifest_id))
-        ok, denied = check_warehouse_access(current["manifest"]["warehouse_id"])
-        if not ok:
-            return denied
-        payload = confirm_manifest(
-            g.db,
-            manifest_id=str(manifest_id),
-            confirmed_by=g.current_user["username"],
-        )
-    except ShipyardServiceError as exc:
-        return _service_error(exc)
-    except IntegrityError:
-        g.db.rollback()
-        return jsonify({"error": "manifest_confirmation_conflict"}), 409
+    current = get_manifest_payload(g.db, str(manifest_id))
+    ok, denied = check_warehouse_access(current["manifest"]["warehouse_id"])
+    if not ok:
+        return denied
+    payload = confirm_manifest(
+        g.db,
+        manifest_id=str(manifest_id),
+        confirmed_by=g.current_user["username"],
+    )
+    return jsonify(payload)
+
+
+@shipyard_bp.post("/inbound/manifests/<uuid:manifest_id>/void")
+@require_auth
+@require_admin_or_page_permission("inbound")
+@validate_body(VoidInboundManifestRequest)
+@with_db
+def void_inbound_manifest(manifest_id, validated):
+    current = get_manifest_payload(g.db, str(manifest_id))
+    ok, denied = check_warehouse_access(current["manifest"]["warehouse_id"])
+    if not ok:
+        return denied
+    payload = void_manifest(
+        g.db,
+        manifest_id=str(manifest_id),
+        reason=validated.reason,
+        voided_by=g.current_user["username"],
+    )
     return jsonify(payload)

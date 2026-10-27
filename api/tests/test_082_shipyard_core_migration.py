@@ -7,7 +7,6 @@ import uuid
 import psycopg2
 from psycopg2.extras import Json
 
-
 MIGRATION_PATH = os.path.join(
     os.path.dirname(__file__),
     "..",
@@ -233,7 +232,10 @@ def test_one_active_primary_bin_per_ship():
             )
             conn.commit()
             assert False, "second active primary bin should violate UNIQUE"
-        except psycopg2.errors.UniqueViolation:
+        except (
+            psycopg2.errors.UniqueViolation,
+            psycopg2.errors.ExclusionViolation,
+        ):
             conn.rollback()
     finally:
         conn.close()
@@ -248,7 +250,6 @@ def test_one_ticket_per_inbound_line():
         _make_ticket(conn, line_id, bin_id, suffix="a")
         conn.commit()
 
-        cur = conn.cursor()
         try:
             _make_ticket(conn, line_id, bin_id, suffix="b")
             conn.commit()
@@ -411,5 +412,12 @@ def test_migration_is_idempotent():
     try:
         cur = conn.cursor()
         cur.execute(sql)
+        later_migration = os.path.join(
+            os.path.dirname(MIGRATION_PATH),
+            "083_shipyard_integrity.sql",
+        )
+        if os.path.exists(later_migration):
+            with open(later_migration, encoding="utf-8") as migration:
+                cur.execute(migration.read())
     finally:
         conn.close()

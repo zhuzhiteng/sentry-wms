@@ -105,6 +105,7 @@ ALL_TABLES = [
     "shipyard_pallet_units",
     "shipyard_cargo_tickets",
     "shipyard_inbound_lines",
+    "shipyard_manifest_files",
     "shipyard_inbound_manifests",
     "shipyard_zone_ship_mappings",
     "shipyard_project_bindings",

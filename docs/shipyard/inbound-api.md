@@ -23,12 +23,18 @@ manufacturer_name` 只能存在一条有效绑定。
 二级区域直接使用 Sentry 的 `bins`，完整路径由所属 `zones` 和 `bins`
 组成。一个区域可以配置多个船号；一个船号当前只能有一个有效主入库区域。
 
+配置保存 `effective_from` / `effective_to` 时间窗。数据库使用 PostgreSQL
+`tstzrange` 排斥约束阻止同一船号在同一时间出现两个主区域，同时允许今天、
+下月等相邻的非重叠窗口预先配置。API 只使用当前时间窗内的映射。
+
 ### 入库清单识别
 
 - `POST /api/shipyard/inbound/manifests/preview`
 - `GET /api/shipyard/inbound/manifests?warehouse_id=1`
 - `GET /api/shipyard/inbound/manifests/<manifest_id>`
+- `GET /api/shipyard/inbound/manifests/<manifest_id>/file`
 - `POST /api/shipyard/inbound/manifests/<manifest_id>/confirm`
+- `POST /api/shipyard/inbound/manifests/<manifest_id>/void`
 
 预览接口使用 `multipart/form-data`：
 
@@ -59,13 +65,18 @@ manufacturer_name` 只能存在一条有效绑定。
 确认接口只接受空 JSON 对象 `{}`。确认时系统重新读取当前区域配置，并执行：
 
 1. 只允许 `PARSED` 状态确认，重复确认返回 `409`；
-2. 每个船号必须存在且只存在一个有效主入库区域；
-3. 一条清单行生成一张状态为 `EXPECTED` 的票货；
-4. 票货保存区域路径快照，后续区域改名不破坏历史；
-5. 票货写入 Sentry 的 `stock_lot_number` 映射值，为后续库存入账预留；
-6. 清单状态改为 `CONFIRMED`，同时写入审计日志。
+2. 每条明细必须唯一匹配当前有效的船号/工程号/制作图/厂家绑定；
+3. 每个船号必须存在且只存在一个当前有效的主入库区域；
+4. 一条清单行生成一张状态为 `EXPECTED` 的票货；
+5. 票货保存区域路径快照，后续区域改名不破坏历史；
+6. 票货写入 Sentry 的 `stock_lot_number` 映射值，为后续库存入账预留；
+7. 清单状态改为 `CONFIRMED`，同时写入审计日志。
 
 未配置区域时允许预览，但禁止确认，确保现场不能绕过船号定置规则。
+
+预览同时保存原始 `.xlsx` 文件和 SHA-256。文件可通过 `/file` 下载用于追溯。
+尚未确认的清单可填写原因后废弃；废弃状态不占用文件哈希，因此同一文件可以
+重新导入。首期原文件存于 PostgreSQL，后续可平滑迁移到对象存储。
 
 ## 模板识别
 
@@ -101,4 +112,5 @@ docker compose exec -T `
   api python -m pytest tests/shipyard tests/test_082_shipyard_core_migration.py -q
 ```
 
-第一切片验证结果：`18 passed`。
+船厂业务、082/083 迁移及认证回归验证结果：`88 passed`。仅运行船厂业务与
+082/083 迁移时为 `41 passed`，`services/shipyard` 覆盖率为 91%。

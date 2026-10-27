@@ -4,57 +4,42 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 from psycopg2.extras import Json
 from sqlalchemy import text
 
-from services.audit_service import write_audit_log
-from services.shipyard.manifest_parser import (
-    ManifestParseError,
-    ParsedInboundWorkbook,
-    parse_inbound_workbook,
+from constants import (
+    ACTION_SHIPYARD_INBOUND_MANIFEST_CONFIRMED,
+    ACTION_SHIPYARD_INBOUND_MANIFEST_PARSED,
+    ACTION_SHIPYARD_INBOUND_MANIFEST_VOIDED,
+    SHIPYARD_BINDING_AMBIGUOUS,
+    SHIPYARD_BINDING_MATCHED,
+    SHIPYARD_BINDING_MISMATCH,
+    SHIPYARD_BINDING_NOT_CONFIGURED,
+    SHIPYARD_LINE_PENDING,
+    SHIPYARD_MANIFEST_CONFIRMED,
+    SHIPYARD_MANIFEST_PARSED,
+    SHIPYARD_MANIFEST_VOID,
+    SHIPYARD_STATUS_ACTIVE,
+    SHIPYARD_TICKET_EXPECTED,
 )
+from services.audit_service import write_audit_log
+from services.shipyard.errors import (
+    BindingConfigurationError,
+    DuplicateManifestFileError,
+    ManifestNotFoundError,
+    ManifestStateError,
+    ShipyardServiceError,
+    WarehouseNotFoundError,
+    ZoneConfigurationError,
+)
+from services.shipyard.manifest_parser import parse_inbound_workbook
 
 
-class ShipyardServiceError(Exception):
-    code = "shipyard_error"
-    status_code = 400
-
-    def __init__(self, message: str, details: Optional[dict[str, Any]] = None):
-        super().__init__(message)
-        self.message = message
-        self.details = details or {}
-
-
-class DuplicateManifestFileError(ShipyardServiceError):
-    code = "duplicate_manifest_file"
-    status_code = 409
-
-
-class ManifestNotFoundError(ShipyardServiceError):
-    code = "manifest_not_found"
-    status_code = 404
-
-
-class ManifestStateError(ShipyardServiceError):
-    code = "manifest_state_conflict"
-    status_code = 409
-
-
-class ZoneConfigurationError(ShipyardServiceError):
-    code = "zone_configuration_required"
-    status_code = 422
-
-
-class WarehouseNotFoundError(ShipyardServiceError):
-    code = "warehouse_not_found"
-    status_code = 404
-
-
-def _iso(value: Any) -> Optional[str]:
+def _iso(value: Any) -> str | None:
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -88,13 +73,18 @@ def _zone_rows_for_ships(db, warehouse_id: int, ship_nos: list[str]):
               FROM shipyard_zone_ship_mappings m
               JOIN bins b ON b.bin_id = m.bin_id
               LEFT JOIN zones z ON z.zone_id = b.zone_id
-             WHERE m.status = 'ACTIVE'
+             WHERE m.status = :active_status
                AND m.is_primary = TRUE
                AND m.ship_no = ANY(:ship_nos)
+               AND m.effective_from <= NOW()
+               AND (m.effective_to IS NULL OR m.effective_to > NOW())
              ORDER BY m.ship_no
             """
         ),
-        {"ship_nos": ship_nos},
+        {
+            "ship_nos": ship_nos,
+            "active_status": SHIPYARD_STATUS_ACTIVE,
+        },
     ).fetchall()
     return {row.ship_no: row for row in rows if row.warehouse_id == warehouse_id}
 
@@ -109,13 +99,18 @@ def _binding_rows_for_ships(db, ship_nos: list[str]):
                    production_drawing_no, manufacturer_name,
                    effective_from, effective_to
               FROM shipyard_project_bindings
-             WHERE status = 'ACTIVE'
+             WHERE status = :active_status
                AND ship_no = ANY(:ship_nos)
+               AND effective_from <= NOW()
+               AND (effective_to IS NULL OR effective_to > NOW())
              ORDER BY ship_no, engineering_no, production_drawing_no,
                       manufacturer_name
             """
         ),
-        {"ship_nos": ship_nos},
+        {
+            "ship_nos": ship_nos,
+            "active_status": SHIPYARD_STATUS_ACTIVE,
+        },
     ).fetchall()
     grouped: dict[str, list[Any]] = {}
     for row in rows:
@@ -127,18 +122,17 @@ def _binding_status(line, bindings: dict[str, list[Any]]) -> dict[str, Any]:
     candidates = bindings.get(line.ship_no, [])
     if not candidates:
         return {
-            "status": "NOT_CONFIGURED",
+            "status": SHIPYARD_BINDING_NOT_CONFIGURED,
             "message": "该船号尚未配置船号/工程号/制作图绑定",
         }
 
+    matches = []
     for binding in candidates:
-        engineering_matches = (
-            not line.engineering_no
-            or binding.engineering_no == line.engineering_no
+        engineering_matches = not line.engineering_no or (
+            binding.engineering_no == line.engineering_no
         )
-        drawing_matches = (
-            not line.production_drawing_no
-            or binding.production_drawing_no == line.production_drawing_no
+        drawing_matches = not line.production_drawing_no or (
+            binding.production_drawing_no == line.production_drawing_no
         )
         manufacturer_matches = (
             not line.manufacturer_name
@@ -146,13 +140,21 @@ def _binding_status(line, bindings: dict[str, list[Any]]) -> dict[str, Any]:
             or binding.manufacturer_name == line.manufacturer_name
         )
         if engineering_matches and drawing_matches and manufacturer_matches:
-            return {
-                "status": "MATCHED",
-                "binding_id": binding.binding_id,
-            }
+            matches.append(binding)
 
+    if len(matches) == 1:
+        return {
+            "status": SHIPYARD_BINDING_MATCHED,
+            "binding_id": matches[0].binding_id,
+        }
+    if len(matches) > 1:
+        return {
+            "status": SHIPYARD_BINDING_AMBIGUOUS,
+            "message": "清单字段匹配到多条船号绑定",
+            "binding_ids": [binding.binding_id for binding in matches],
+        }
     return {
-        "status": "MISMATCH",
+        "status": SHIPYARD_BINDING_MISMATCH,
         "message": "清单字段与现有绑定不一致",
     }
 
@@ -202,11 +204,23 @@ def get_manifest_payload(db, manifest_id: str) -> dict[str, Any]:
     bindings = _binding_rows_for_ships(db, ship_nos)
 
     missing_zone_ships: list[str] = []
+    binding_errors: list[dict[str, Any]] = []
     line_payloads = []
     for line in lines:
         zone = zones.get(line.ship_no)
         if zone is None:
             missing_zone_ships.append(line.ship_no)
+        binding_status = _binding_status(line, bindings)
+        if binding_status["status"] != SHIPYARD_BINDING_MATCHED:
+            binding_errors.append(
+                {
+                    "source_row_no": line.source_row_no,
+                    "ship_no": line.ship_no,
+                    "production_drawing_no": line.production_drawing_no,
+                    "manufacturer_name": line.manufacturer_name,
+                    **binding_status,
+                }
+            )
         line_payloads.append(
             {
                 "line_id": str(line.line_id),
@@ -229,15 +243,13 @@ def get_manifest_payload(db, manifest_id: str) -> dict[str, Any]:
                         "bin_code": zone.bin_code,
                         "zone_code": zone.zone_code,
                         "zone_name": zone.zone_name,
-                        "location_path": _location_path(
-                            zone.zone_code, zone.bin_code
-                        ),
+                        "location_path": _location_path(zone.zone_code, zone.bin_code),
                     }
                     if zone
                     else None
                 ),
                 "zone_status": "READY" if zone else "MISSING",
-                "binding": _binding_status(line, bindings),
+                "binding": binding_status,
                 "status": line.status,
                 "raw_data": line.raw_data,
             }
@@ -260,9 +272,10 @@ def get_manifest_payload(db, manifest_id: str) -> dict[str, Any]:
     ).fetchall()
 
     can_confirm = (
-        manifest.status == "PARSED"
+        manifest.status == SHIPYARD_MANIFEST_PARSED
         and bool(line_payloads)
         and not missing_zone_ships
+        and not binding_errors
     )
     blocking_errors = []
     if missing_zone_ships:
@@ -271,6 +284,14 @@ def get_manifest_payload(db, manifest_id: str) -> dict[str, Any]:
                 "code": "ZONE_CONFIGURATION_REQUIRED",
                 "ship_nos": sorted(set(missing_zone_ships)),
                 "message": "以下船号未配置唯一的主入库二级区域",
+            }
+        )
+    if binding_errors:
+        blocking_errors.append(
+            {
+                "code": "BINDING_CONFIGURATION_REQUIRED",
+                "lines": binding_errors,
+                "message": "存在未配置、冲突或无法唯一匹配的船号/工程号/制作图绑定",
             }
         )
 
@@ -307,6 +328,7 @@ def get_manifest_payload(db, manifest_id: str) -> dict[str, Any]:
         "validation": {
             "can_confirm": can_confirm,
             "missing_zone_ship_nos": sorted(set(missing_zone_ships)),
+            "binding_error_count": len(binding_errors),
             "blocking_errors": blocking_errors,
             "summary": {
                 "line_count": len(line_payloads),
@@ -314,7 +336,7 @@ def get_manifest_payload(db, manifest_id: str) -> dict[str, Any]:
                 "total_quantity": format(
                     sum(
                         (line.declared_quantity for line in lines),
-                        Decimal("0"),
+                        Decimal(0),
                     ),
                     "f",
                 ),
@@ -339,29 +361,15 @@ def _check_warehouse(db, warehouse_id: int) -> None:
         raise WarehouseNotFoundError("仓库不存在或已停用")
 
 
-def _parse_or_raise(
-    content: bytes,
-    manufacturer_name: Optional[str],
-    source_file_name: str,
-) -> ParsedInboundWorkbook:
-    try:
-        return parse_inbound_workbook(
-            content,
-            manufacturer_name=manufacturer_name,
-            source_file_name=source_file_name,
-        )
-    except ManifestParseError:
-        raise
-
-
 def create_manifest_preview(
     db,
     *,
     warehouse_id: int,
-    manifest_no: Optional[str],
+    manifest_no: str | None,
     source_file_name: str,
+    content_type: str,
     content: bytes,
-    manufacturer_name: Optional[str],
+    manufacturer_name: str | None,
     created_by: str,
 ) -> dict[str, Any]:
     _check_warehouse(db, warehouse_id)
@@ -373,9 +381,14 @@ def create_manifest_preview(
               FROM shipyard_inbound_manifests
              WHERE warehouse_id = :warehouse_id
                AND source_file_sha256 = :file_hash
+               AND status <> :void_status
             """
         ),
-        {"warehouse_id": warehouse_id, "file_hash": file_hash},
+        {
+            "warehouse_id": warehouse_id,
+            "file_hash": file_hash,
+            "void_status": SHIPYARD_MANIFEST_VOID,
+        },
     ).fetchone()
     if existing is not None:
         raise DuplicateManifestFileError(
@@ -383,11 +396,14 @@ def create_manifest_preview(
             {"manifest_id": str(existing.manifest_id)},
         )
 
-    parsed = _parse_or_raise(content, manufacturer_name, source_file_name)
-    generated_manifest_no = (
-        (manifest_no or "").strip()
-        or f"IN-{datetime.now(timezone.utc):%Y%m%d}-{file_hash[:8].upper()}"
+    parsed = parse_inbound_workbook(
+        content,
+        manufacturer_name=manufacturer_name,
+        source_file_name=source_file_name,
     )
+    generated_manifest_no = (
+        manifest_no or ""
+    ).strip() or f"IN-{datetime.now(UTC):%Y%m%d}-{file_hash[:8].upper()}"
     if len(generated_manifest_no) > 128:
         raise ShipyardServiceError("清单编号不能超过 128 个字符")
 
@@ -418,7 +434,7 @@ def create_manifest_preview(
             VALUES
                 (:warehouse_id, :manifest_no, 'EXCEL', :source_file_name,
                  :source_file_sha256, 'shipyard-excel-v1', :metadata,
-                 'PARSED', :created_by)
+                 :parsed_status, :created_by)
             RETURNING manifest_id
             """
         ),
@@ -428,10 +444,46 @@ def create_manifest_preview(
             "source_file_name": source_file_name[:255],
             "source_file_sha256": file_hash,
             "metadata": Json(parsed.metadata),
+            "parsed_status": SHIPYARD_MANIFEST_PARSED,
             "created_by": created_by,
         },
     ).fetchone()
     manifest_id = manifest.manifest_id
+    original_file_url = f"/api/shipyard/inbound/manifests/{manifest_id}/file"
+    db.execute(
+        text(
+            """
+            INSERT INTO shipyard_manifest_files
+                (manifest_id, file_name, content_type, file_size,
+                 file_sha256, file_bytes)
+            VALUES
+                (:manifest_id, :file_name, :content_type, :file_size,
+                 :file_sha256, :file_bytes)
+            """
+        ),
+        {
+            "manifest_id": manifest_id,
+            "file_name": source_file_name[:255],
+            "content_type": content_type[:128],
+            "file_size": len(content),
+            "file_sha256": file_hash,
+            "file_bytes": content,
+        },
+    )
+    db.execute(
+        text(
+            """
+            UPDATE shipyard_inbound_manifests
+               SET original_file_url = :original_file_url,
+                   updated_at = NOW()
+             WHERE manifest_id = :manifest_id
+            """
+        ),
+        {
+            "manifest_id": manifest_id,
+            "original_file_url": original_file_url,
+        },
+    )
 
     for line in parsed.lines:
         db.execute(
@@ -447,7 +499,7 @@ def create_manifest_preview(
                      :engineering_no, :production_drawing_no, :drawing_name,
                      :manufacturer_name, :delivery_note_no, :po_no, :item_name,
                      :item_spec, :unit, :declared_quantity, :raw_data,
-                     'PENDING')
+                     :pending_status)
                 """
             ),
             {
@@ -466,12 +518,13 @@ def create_manifest_preview(
                 "unit": line.unit,
                 "declared_quantity": line.declared_quantity,
                 "raw_data": Json(line.raw_data),
+                "pending_status": SHIPYARD_LINE_PENDING,
             },
         )
 
     write_audit_log(
         db,
-        action_type="SHIPYARD_INBOUND_MANIFEST_PARSED",
+        action_type=ACTION_SHIPYARD_INBOUND_MANIFEST_PARSED,
         entity_type="shipyard_inbound_manifest",
         entity_id=0,
         user_id=created_by,
@@ -501,7 +554,7 @@ def confirm_manifest(db, *, manifest_id: str, confirmed_by: str) -> dict[str, An
     ).fetchone()
     if manifest is None:
         raise ManifestNotFoundError("入库清单不存在")
-    if manifest.status != "PARSED":
+    if manifest.status != SHIPYARD_MANIFEST_PARSED:
         raise ManifestStateError(
             "只有已解析、未确认的入库清单可以确认",
             {"status": manifest.status},
@@ -510,8 +563,9 @@ def confirm_manifest(db, *, manifest_id: str, confirmed_by: str) -> dict[str, An
     lines = db.execute(
         text(
             """
-            SELECT line_id, source_row_no, ship_no, item_name,
-                   declared_quantity, assigned_bin_id
+            SELECT line_id, source_row_no, ship_no, engineering_no,
+                   production_drawing_no, manufacturer_name,
+                   item_name, declared_quantity, assigned_bin_id
               FROM shipyard_inbound_lines
              WHERE manifest_id = :manifest_id
              ORDER BY source_row_no
@@ -524,6 +578,26 @@ def confirm_manifest(db, *, manifest_id: str, confirmed_by: str) -> dict[str, An
         raise ShipyardServiceError("入库清单没有明细行")
 
     ship_nos = sorted({line.ship_no for line in lines})
+    bindings = _binding_rows_for_ships(db, ship_nos)
+    binding_errors = []
+    for line in lines:
+        status = _binding_status(line, bindings)
+        if status["status"] != SHIPYARD_BINDING_MATCHED:
+            binding_errors.append(
+                {
+                    "source_row_no": line.source_row_no,
+                    "ship_no": line.ship_no,
+                    "production_drawing_no": line.production_drawing_no,
+                    "manufacturer_name": line.manufacturer_name,
+                    **status,
+                }
+            )
+    if binding_errors:
+        raise BindingConfigurationError(
+            "船号/工程号/制作图绑定未配置、冲突或不唯一，不能确认清单",
+            {"lines": binding_errors},
+        )
+
     zones = _zone_rows_for_ships(db, manifest.warehouse_id, ship_nos)
     missing = [ship_no for ship_no in ship_nos if ship_no not in zones]
     if missing:
@@ -538,7 +612,7 @@ def confirm_manifest(db, *, manifest_id: str, confirmed_by: str) -> dict[str, An
         zone = zones[line.ship_no]
         while True:
             ticket_suffix = uuid.uuid4().hex[:12].upper()
-            ticket_no = f"SY-{datetime.now(timezone.utc):%Y%m%d}-{ticket_suffix}"
+            ticket_no = f"SY-{datetime.now(UTC):%Y%m%d}-{ticket_suffix}"
             if ticket_no not in used_ticket_nos:
                 used_ticket_nos.add(ticket_no)
                 break
@@ -555,7 +629,7 @@ def confirm_manifest(db, *, manifest_id: str, confirmed_by: str) -> dict[str, An
                 VALUES
                     (:ticket_no, :inbound_line_id, :declared_quantity,
                      0, :assigned_bin_id, :location_path_snapshot,
-                     :stock_lot_number, 'EXPECTED', :created_by)
+                     :stock_lot_number, :ticket_status, :created_by)
                 RETURNING ticket_id, ticket_no
                 """
             ),
@@ -566,6 +640,7 @@ def confirm_manifest(db, *, manifest_id: str, confirmed_by: str) -> dict[str, An
                 "assigned_bin_id": zone.bin_id,
                 "location_path_snapshot": location_path,
                 "stock_lot_number": stock_lot_number,
+                "ticket_status": SHIPYARD_TICKET_EXPECTED,
                 "created_by": confirmed_by,
             },
         ).fetchone()
@@ -595,16 +670,19 @@ def confirm_manifest(db, *, manifest_id: str, confirmed_by: str) -> dict[str, An
         text(
             """
             UPDATE shipyard_inbound_manifests
-               SET status = 'CONFIRMED',
+               SET status = :confirmed_status,
                    updated_at = NOW()
              WHERE manifest_id = :manifest_id
             """
         ),
-        {"manifest_id": manifest_id},
+        {
+            "manifest_id": manifest_id,
+            "confirmed_status": SHIPYARD_MANIFEST_CONFIRMED,
+        },
     )
     write_audit_log(
         db,
-        action_type="SHIPYARD_INBOUND_MANIFEST_CONFIRMED",
+        action_type=ACTION_SHIPYARD_INBOUND_MANIFEST_CONFIRMED,
         entity_type="shipyard_inbound_manifest",
         entity_id=0,
         user_id=confirmed_by,
@@ -621,14 +699,105 @@ def confirm_manifest(db, *, manifest_id: str, confirmed_by: str) -> dict[str, An
     return payload
 
 
+def void_manifest(
+    db,
+    *,
+    manifest_id: str,
+    reason: str,
+    voided_by: str,
+) -> dict[str, Any]:
+    manifest = db.execute(
+        text(
+            """
+            SELECT manifest_id, warehouse_id, manifest_no, status
+              FROM shipyard_inbound_manifests
+             WHERE manifest_id = :manifest_id
+             FOR UPDATE
+            """
+        ),
+        {"manifest_id": manifest_id},
+    ).fetchone()
+    if manifest is None:
+        raise ManifestNotFoundError("入库清单不存在")
+    if manifest.status != SHIPYARD_MANIFEST_PARSED:
+        raise ManifestStateError(
+            "只有尚未确认的入库清单可以废弃",
+            {"status": manifest.status},
+        )
+
+    db.execute(
+        text(
+            """
+            UPDATE shipyard_inbound_manifests
+               SET status = :void_status,
+                   metadata = metadata || :void_metadata,
+                   updated_at = NOW()
+             WHERE manifest_id = :manifest_id
+            """
+        ),
+        {
+            "manifest_id": manifest_id,
+            "void_status": SHIPYARD_MANIFEST_VOID,
+            "void_metadata": Json(
+                {
+                    "void_reason": reason,
+                    "voided_by": voided_by,
+                    "voided_at": datetime.now(UTC).isoformat(),
+                }
+            ),
+        },
+    )
+    write_audit_log(
+        db,
+        action_type=ACTION_SHIPYARD_INBOUND_MANIFEST_VOIDED,
+        entity_type="shipyard_inbound_manifest",
+        entity_id=0,
+        user_id=voided_by,
+        warehouse_id=manifest.warehouse_id,
+        details={
+            "manifest_id": manifest_id,
+            "manifest_no": manifest.manifest_no,
+            "reason": reason,
+        },
+    )
+    db.commit()
+    return get_manifest_payload(db, manifest_id)
+
+
+def get_manifest_file(db, *, manifest_id: str) -> dict[str, Any]:
+    row = db.execute(
+        text(
+            """
+            SELECT m.warehouse_id, f.file_name, f.content_type,
+                   f.file_size, f.file_sha256, f.file_bytes
+              FROM shipyard_inbound_manifests m
+              JOIN shipyard_manifest_files f
+                ON f.manifest_id = m.manifest_id
+             WHERE m.manifest_id = :manifest_id
+            """
+        ),
+        {"manifest_id": manifest_id},
+    ).fetchone()
+    if row is None:
+        raise ManifestNotFoundError("入库清单原始文件不存在")
+    return {
+        "warehouse_id": row.warehouse_id,
+        "file_name": row.file_name,
+        "content_type": row.content_type,
+        "file_size": row.file_size,
+        "file_sha256": row.file_sha256,
+        "file_bytes": bytes(row.file_bytes),
+    }
+
+
 def list_manifests(db, *, warehouse_id: int, limit: int = 50) -> dict[str, Any]:
     _check_warehouse(db, warehouse_id)
     rows = db.execute(
         text(
             """
             SELECT m.manifest_id, m.manifest_no, m.source_file_name,
-                   m.status, m.metadata, m.created_by, m.created_at,
-                   m.updated_at,
+                   m.original_file_url, m.status, m.metadata, m.created_by,
+                   m.created_at, m.updated_at,
                    COUNT(l.line_id) AS line_count,
                    COALESCE(SUM(l.declared_quantity), 0) AS total_quantity
               FROM shipyard_inbound_manifests m
@@ -648,6 +817,7 @@ def list_manifests(db, *, warehouse_id: int, limit: int = 50) -> dict[str, Any]:
                 "manifest_id": str(row.manifest_id),
                 "manifest_no": row.manifest_no,
                 "source_file_name": row.source_file_name,
+                "original_file_url": row.original_file_url,
                 "status": row.status,
                 "metadata": row.metadata,
                 "created_by": row.created_by,

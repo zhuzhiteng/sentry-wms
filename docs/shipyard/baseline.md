@@ -55,7 +55,7 @@ Windows.
 Commands use a dedicated `sentry_test` database.
 
 ```text
-Backend: 2946 passed, 55 skipped, 11 warnings in 683.14s
+Backend: 2987 passed, 55 skipped, 11 warnings in 354.29s
 Admin:   30 test files passed, 193 tests passed
 Build:   API, workers, dispatcher, and admin images built successfully
 Health:  GET /api/health -> {"service":"sentry-wms","status":"ok"}
@@ -78,21 +78,25 @@ It does not disable authentication, tenant checks, or inventory locking.
 
 ## Dependency findings
 
-`npm audit` reports 11 known vulnerabilities in the admin dependency tree:
+The shipyard dependency review upgraded Vite to 8.3.5, Vitest to 4.1.12,
+PyJWT to 2.15.0, and refreshed the remaining locked transitive packages.
 
-- 0 critical
-- 7 high
-- 4 moderate
+- `pip-audit`: no known vulnerabilities;
+- `npm audit`: 0 vulnerabilities;
+- admin test suite: 30 files and 193 tests passed;
+- admin production build: passed;
+- admin lint still reports the upstream baseline's 64 errors and 13 warnings.
 
-Direct vulnerable packages include `vite` and `vitest`. Transitive packages
-include `brace-expansion`, `browserslist`, `js-yaml`, `source-map-js`,
-`undici`, and `zod`.
-
-No automatic dependency upgrade is included in the baseline commit. Dependency
-updates must be performed as a separate reviewed change with a full admin build,
-unit test run, and browser smoke test.
+The admin lint debt is not introduced by the shipyard domain and must not be
+described as clean until it is reduced and re-verified.
 
 ## Current status
 
 The upstream application builds and its original test suites pass on this
-workstation. The shipyard domain has not yet been implemented.
+workstation. The first shipyard slice is implemented: temporal project/zone
+configuration, fixed-template inbound manifest parsing, source-file retention,
+binding enforcement, manifest void/reimport, and one cargo ticket per source
+row.
+
+The next slice is handheld pallet scanning, partial receipt, replenishment and
+the `shipyard_inventory_service` integration with Sentry inventory.

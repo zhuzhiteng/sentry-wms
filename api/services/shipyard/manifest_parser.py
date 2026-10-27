@@ -17,12 +17,11 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
-from typing import Any, Optional
+from typing import Any
 from zipfile import BadZipFile, ZipFile
 
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
-
 
 MAX_SCAN_ROWS = 5000
 MAX_TEMPLATE_COLUMNS = 64
@@ -57,12 +56,12 @@ class ParsedInboundLine:
     ship_no: str
     engineering_no: str
     production_drawing_no: str
-    drawing_name: Optional[str]
+    drawing_name: str | None
     manufacturer_name: str
-    delivery_note_no: Optional[str]
-    po_no: Optional[str]
+    delivery_note_no: str | None
+    po_no: str | None
     item_name: str
-    item_spec: Optional[str]
+    item_spec: str | None
     unit: str
     declared_quantity: Decimal
     raw_data: dict[str, Any]
@@ -79,7 +78,7 @@ class ParsedInboundWorkbook:
 class ManifestParseError(ValueError):
     """Raised when an uploaded workbook cannot be safely converted to lines."""
 
-    def __init__(self, message: str, diagnostics: Optional[list[dict[str, Any]]] = None):
+    def __init__(self, message: str, diagnostics: list[dict[str, Any]] | None = None):
         super().__init__(message)
         self.diagnostics = diagnostics or []
 
@@ -97,7 +96,7 @@ _NORMALIZED_ALIASES = {
 }
 
 
-def _to_text(value: Any) -> Optional[str]:
+def _to_text(value: Any) -> str | None:
     if value is None:
         return None
     if isinstance(value, datetime):
@@ -116,7 +115,7 @@ def _to_text(value: Any) -> Optional[str]:
     return text or None
 
 
-def _to_decimal(value: Any) -> Optional[Decimal]:
+def _to_decimal(value: Any) -> Decimal | None:
     if value is None or value == "":
         return None
     if isinstance(value, bool):
@@ -144,7 +143,7 @@ def _json_value(value: Any) -> Any:
     return str(value)
 
 
-def _cell(values: tuple[Any, ...], index: Optional[int]) -> Any:
+def _cell(values: tuple[Any, ...], index: int | None) -> Any:
     if index is None or index >= len(values):
         return None
     return values[index]
@@ -152,7 +151,7 @@ def _cell(values: tuple[Any, ...], index: Optional[int]) -> Any:
 
 def _find_header(
     rows: list[tuple[int, tuple[Any, ...]]],
-) -> Optional[tuple[int, int, dict[str, int], dict[str, str]]]:
+) -> tuple[int, int, dict[str, int], dict[str, str]] | None:
     best = None
     best_score = -1
     for row_offset, (excel_row, values) in enumerate(rows[:HEADER_SEARCH_ROWS]):
@@ -171,7 +170,9 @@ def _find_header(
         has_core_fields = (
             "ship_no" in mapping
             and "declared_quantity" in mapping
-            and ({"item_name", "drawing_name", "production_drawing_no"} & mapping.keys())
+            and (
+                {"item_name", "drawing_name", "production_drawing_no"} & mapping.keys()
+            )
         )
         if not has_core_fields:
             continue
@@ -220,7 +221,7 @@ def _extract_manufacturer(title_rows: list[str]) -> str:
     return ""
 
 
-def _extract_document_date(rows: list[tuple[int, tuple[Any, ...]]]) -> Optional[str]:
+def _extract_document_date(rows: list[tuple[int, tuple[Any, ...]]]) -> str | None:
     for _, values in rows:
         for value in values:
             if isinstance(value, datetime):
@@ -253,7 +254,10 @@ def _validate_xlsx_archive(content: bytes) -> None:
                     "Excel 文件包含过多内部文件，拒绝解析",
                     [{"code": "XLSX_TOO_MANY_ENTRIES"}],
                 )
-            if sum(entry.file_size for entry in entries) > MAX_UNCOMPRESSED_ARCHIVE_BYTES:
+            if (
+                sum(entry.file_size for entry in entries)
+                > MAX_UNCOMPRESSED_ARCHIVE_BYTES
+            ):
                 raise ManifestParseError(
                     "Excel 解压后体积过大，拒绝解析",
                     [{"code": "XLSX_UNCOMPRESSED_TOO_LARGE"}],
@@ -264,11 +268,154 @@ def _validate_xlsx_archive(content: bytes) -> None:
         ) from exc
 
 
+def _parse_business_row(
+    *,
+    excel_row: int,
+    values: tuple[Any, ...],
+    mapping: dict[str, int],
+    labels: dict[str, str],
+    sheet_name: str,
+    manufacturer_name: str,
+    seen_source_rows: set[str],
+) -> tuple[ParsedInboundLine | None, list[dict[str, Any]]]:
+    ship_no = _to_text(_cell(values, mapping.get("ship_no")))
+    quantity_raw = _cell(values, mapping.get("declared_quantity"))
+    item_name = _to_text(_cell(values, mapping.get("item_name")))
+    drawing_name = _to_text(_cell(values, mapping.get("drawing_name")))
+    drawing_no = _to_text(_cell(values, mapping.get("production_drawing_no")))
+    serial = _to_text(_cell(values, mapping.get("source_row_no")))
+
+    if not any(_to_text(value) is not None for value in values):
+        return None, []
+    if not ship_no:
+        if item_name or drawing_name or drawing_no or quantity_raw is not None:
+            return None, [
+                {
+                    "code": "MISSING_SHIP_NO",
+                    "excel_row": excel_row,
+                    "message": "存在货物数据但船号为空",
+                }
+            ]
+        return None, []
+
+    if quantity_raw is None or _to_text(quantity_raw) is None:
+        return None, [
+            {
+                "code": "MISSING_QUANTITY",
+                "excel_row": excel_row,
+                "ship_no": ship_no,
+                "message": "件数为空",
+            }
+        ]
+
+    declared_quantity = _to_decimal(quantity_raw)
+    if declared_quantity is None or declared_quantity <= 0:
+        return None, [
+            {
+                "code": "INVALID_QUANTITY",
+                "excel_row": excel_row,
+                "ship_no": ship_no,
+                "value": _json_value(quantity_raw),
+                "message": "件数必须为正数",
+            }
+        ]
+
+    resolved_item_name = item_name or drawing_name or drawing_no
+    if not resolved_item_name:
+        return None, [
+            {
+                "code": "MISSING_ITEM_NAME",
+                "excel_row": excel_row,
+                "ship_no": ship_no,
+                "message": "品名、图名和图号均为空",
+            }
+        ]
+
+    source_row_no = serial or str(excel_row)
+    if source_row_no in seen_source_rows:
+        return None, [
+            {
+                "code": "DUPLICATE_SOURCE_ROW",
+                "excel_row": excel_row,
+                "source_row_no": source_row_no,
+                "message": "清单行号重复，无法建立一一对应关系",
+            }
+        ]
+    seen_source_rows.add(source_row_no)
+
+    raw_data = {
+        labels[canonical]: _json_value(_cell(values, column_index))
+        for canonical, column_index in mapping.items()
+    }
+    raw_data.update(
+        {
+            "excel_row": excel_row,
+            "sheet_name": sheet_name,
+            "form_template": "factory_inbound_manifest",
+        }
+    )
+    line_payload = {
+        "source_row_no": source_row_no,
+        "ship_no": ship_no,
+        "production_drawing_no": drawing_no or "",
+        "drawing_name": drawing_name or "",
+        "declared_quantity": format(declared_quantity, "f"),
+    }
+    line = ParsedInboundLine(
+        source_row_no=source_row_no,
+        source_row_hash=_row_hash(line_payload),
+        ship_no=ship_no,
+        engineering_no=(_to_text(_cell(values, mapping.get("engineering_no"))) or ""),
+        production_drawing_no=drawing_no or "",
+        drawing_name=drawing_name,
+        manufacturer_name=manufacturer_name,
+        delivery_note_no=_to_text(_cell(values, mapping.get("delivery_note_no"))),
+        po_no=(
+            _to_text(_cell(values, mapping.get("po_no")))
+            or _to_text(_cell(values, mapping.get("po_reference")))
+        ),
+        item_name=resolved_item_name[:255],
+        item_spec=_to_text(_cell(values, mapping.get("item_spec"))),
+        unit=_to_text(_cell(values, mapping.get("unit"))) or "件",
+        declared_quantity=declared_quantity,
+        raw_data=raw_data,
+    )
+    return line, []
+
+
+def _parse_business_rows(
+    *,
+    rows: list[tuple[int, tuple[Any, ...]]],
+    header_offset: int,
+    mapping: dict[str, int],
+    labels: dict[str, str],
+    sheet_name: str,
+    manufacturer_name: str,
+) -> tuple[list[ParsedInboundLine], list[dict[str, Any]]]:
+    lines: list[ParsedInboundLine] = []
+    diagnostics: list[dict[str, Any]] = []
+    seen_source_rows: set[str] = set()
+    for excel_row, values in rows[header_offset + 1 :]:
+        line, row_diagnostics = _parse_business_row(
+            excel_row=excel_row,
+            values=values,
+            mapping=mapping,
+            labels=labels,
+            sheet_name=sheet_name,
+            manufacturer_name=manufacturer_name,
+            seen_source_rows=seen_source_rows,
+        )
+        diagnostics.extend(row_diagnostics)
+        if line is not None:
+            lines.append(line)
+    return lines, diagnostics
+
+
 def parse_inbound_workbook(
     content: bytes,
     *,
-    manufacturer_name: Optional[str] = None,
-    source_file_name: Optional[str] = None,
+    manufacturer_name: str | None = None,
+    source_file_name: str | None = None,
 ) -> ParsedInboundWorkbook:
     if not content:
         raise ManifestParseError("上传文件为空")
@@ -281,7 +428,9 @@ def parse_inbound_workbook(
             keep_links=False,
         )
     except (BadZipFile, InvalidFileException, OSError, ValueError) as exc:
-        raise ManifestParseError("无法读取 Excel 文件，请确认文件未损坏且为 .xlsx 格式") from exc
+        raise ManifestParseError(
+            "无法读取 Excel 文件，请确认文件未损坏且为 .xlsx 格式"
+        ) from exc
 
     best = None
     best_score = -1
@@ -313,130 +462,18 @@ def parse_inbound_workbook(
 
     sheet_name, rows, (header_offset, header_excel_row, mapping, labels) = best
     title_rows = _extract_title_rows(rows, header_offset)
-    resolved_manufacturer = (
-        (manufacturer_name or "").strip()[:200]
-        or _extract_manufacturer(title_rows)
+    resolved_manufacturer = (manufacturer_name or "").strip()[
+        :200
+    ] or _extract_manufacturer(title_rows)
+
+    lines, diagnostics = _parse_business_rows(
+        rows=rows,
+        header_offset=header_offset,
+        mapping=mapping,
+        labels=labels,
+        sheet_name=sheet_name,
+        manufacturer_name=resolved_manufacturer,
     )
-
-    lines: list[ParsedInboundLine] = []
-    diagnostics: list[dict[str, Any]] = []
-    seen_source_rows: set[str] = set()
-
-    for excel_row, values in rows[header_offset + 1 :]:
-        ship_no = _to_text(_cell(values, mapping.get("ship_no")))
-        quantity_raw = _cell(values, mapping.get("declared_quantity"))
-        item_name = _to_text(_cell(values, mapping.get("item_name")))
-        drawing_name = _to_text(_cell(values, mapping.get("drawing_name")))
-        drawing_no = _to_text(_cell(values, mapping.get("production_drawing_no")))
-        serial = _to_text(_cell(values, mapping.get("source_row_no")))
-
-        non_empty_values = [value for value in values if _to_text(value) is not None]
-        if not non_empty_values:
-            continue
-        if not ship_no:
-            # Footer, notes and unrelated auxiliary blocks are not business rows.
-            if item_name or drawing_name or drawing_no or quantity_raw is not None:
-                diagnostics.append(
-                    {
-                        "code": "MISSING_SHIP_NO",
-                        "excel_row": excel_row,
-                        "message": "存在货物数据但船号为空",
-                    }
-                )
-            continue
-
-        if quantity_raw is None or _to_text(quantity_raw) is None:
-            diagnostics.append(
-                {
-                    "code": "MISSING_QUANTITY",
-                    "excel_row": excel_row,
-                    "ship_no": ship_no,
-                    "message": "件数为空",
-                }
-            )
-            continue
-
-        declared_quantity = _to_decimal(quantity_raw)
-        if declared_quantity is None or declared_quantity <= 0:
-            diagnostics.append(
-                {
-                    "code": "INVALID_QUANTITY",
-                    "excel_row": excel_row,
-                    "ship_no": ship_no,
-                    "value": _json_value(quantity_raw),
-                    "message": "件数必须为正数",
-                }
-            )
-            continue
-
-        resolved_item_name = item_name or drawing_name or drawing_no
-        if not resolved_item_name:
-            diagnostics.append(
-                {
-                    "code": "MISSING_ITEM_NAME",
-                    "excel_row": excel_row,
-                    "ship_no": ship_no,
-                    "message": "品名、图名和图号均为空",
-                }
-            )
-            continue
-
-        source_row_no = serial or str(excel_row)
-        if source_row_no in seen_source_rows:
-            diagnostics.append(
-                {
-                    "code": "DUPLICATE_SOURCE_ROW",
-                    "excel_row": excel_row,
-                    "source_row_no": source_row_no,
-                    "message": "清单行号重复，无法建立一一对应关系",
-                }
-            )
-            continue
-        seen_source_rows.add(source_row_no)
-
-        raw_data = {
-            labels[canonical]: _json_value(_cell(values, column_index))
-            for canonical, column_index in mapping.items()
-        }
-        raw_data.update(
-            {
-                "excel_row": excel_row,
-                "sheet_name": sheet_name,
-                "form_template": "factory_inbound_manifest",
-            }
-        )
-        line_payload = {
-            "source_row_no": source_row_no,
-            "ship_no": ship_no,
-            "production_drawing_no": drawing_no or "",
-            "drawing_name": drawing_name or "",
-            "declared_quantity": format(declared_quantity, "f"),
-        }
-        lines.append(
-            ParsedInboundLine(
-                source_row_no=source_row_no,
-                source_row_hash=_row_hash(line_payload),
-                ship_no=ship_no,
-                engineering_no=(
-                    _to_text(_cell(values, mapping.get("engineering_no"))) or ""
-                ),
-                production_drawing_no=drawing_no or "",
-                drawing_name=drawing_name,
-                manufacturer_name=resolved_manufacturer,
-                delivery_note_no=_to_text(
-                    _cell(values, mapping.get("delivery_note_no"))
-                ),
-                po_no=(
-                    _to_text(_cell(values, mapping.get("po_no")))
-                    or _to_text(_cell(values, mapping.get("po_reference")))
-                ),
-                item_name=resolved_item_name[:255],
-                item_spec=_to_text(_cell(values, mapping.get("item_spec"))),
-                unit=_to_text(_cell(values, mapping.get("unit"))) or "件",
-                declared_quantity=declared_quantity,
-                raw_data=raw_data,
-            )
-        )
 
     if diagnostics:
         raise ManifestParseError("清单存在无法导入的行", diagnostics)
@@ -449,7 +486,7 @@ def parse_inbound_workbook(
     ignored_sheets = [
         name for name, sheet_rows in sheet_rows_by_name.items() if name != sheet_name
     ]
-    total_quantity = sum((line.declared_quantity for line in lines), Decimal("0"))
+    total_quantity = sum((line.declared_quantity for line in lines), Decimal(0))
     metadata = {
         "parser_version": "shipyard-excel-v1",
         "source_file_name": source_file_name,

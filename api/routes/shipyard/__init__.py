@@ -1,9 +1,39 @@
 """Shipyard WMS API routes."""
 
-from flask import Blueprint
+import logging
 
+from flask import Blueprint, g, jsonify
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+
+from services.shipyard.errors import ShipyardServiceError
 
 shipyard_bp = Blueprint("shipyard", __name__)
+_LOGGER = logging.getLogger(__name__)
 
 
-from routes.shipyard import config, inbound  # noqa: E402, F401
+@shipyard_bp.errorhandler(ShipyardServiceError)
+def _service_error(exc):
+    body = {
+        "error": exc.code,
+        "message": exc.message,
+    }
+    body.update(exc.details)
+    return jsonify(body), exc.status_code
+
+
+@shipyard_bp.errorhandler(IntegrityError)
+def _integrity_error(exc):
+    try:
+        if g.db.is_active:
+            g.db.rollback()
+    except SQLAlchemyError:
+        _LOGGER.warning("Failed to roll back shipyard integrity error", exc_info=True)
+    diagnostic = getattr(getattr(exc, "orig", None), "diag", None)
+    constraint = getattr(diagnostic, "constraint_name", None) if diagnostic else None
+    body = {"error": "shipyard_conflict"}
+    if constraint:
+        body["constraint"] = constraint
+    return jsonify(body), 409
+
+
+from routes.shipyard import config, inbound  # noqa: F401
