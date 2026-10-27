@@ -1,0 +1,68 @@
+.detail-card {
+  border-color: #2d6d96;
+}
+
+.area {
+  margin: 22rpx 0;
+  padding: 20rpx;
+  border-radius: 14rpx;
+  background: #eef5f9;
+}
+
+.area-value {
+  margin-top: 5rpx;
+  color: #154b70;
+  font-size: 34rpx;
+  font-weight: 700;
+}
+
+.suffixes {
+  margin-top: 20rpx;
+  padding: 16rpx 18rpx;
+  border-radius: 12rpx;
+  color: #536675;
+  background: #f5f7f8;
+}
+
+.next-suffix {
+  margin-top: 4rpx;
+  color: #1d5f88;
+  font-size: 46rpx;
+  font-weight: 700;
+}
+
+.progress {
+  color: #365b76;
+  font-size: 38rpx;
+  font-weight: 700;
+}
+
+.scan-card {
+  border-left: 6rpx solid #3b8b67;
+}
+
+.checks {
+  display: flex;
+  flex-direction: column;
+  gap: 8rpx;
+  margin-top: 18rpx;
+  padding: 16rpx 18rpx;
+  border-radius: 12rpx;
+  color: #3d6652;
+  background: #eef8f2;
+  font-size: 23rpx;
+}
+
+.remove-button {
+  margin: 16rpx 0 0;
+  min-height: 60rpx;
+  color: #856141;
+  background: #f8f1e8;
+  border-radius: 10rpx;
+  font-size: 23rpx;
+  line-height: 60rpx;
+}
+
+.remove-button::after {
+  border: 0;
+}
