@@ -1,0 +1,661 @@
+"""Database orchestration for shipyard inbound manifests."""
+
+from __future__ import annotations
+
+import hashlib
+import uuid
+from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Any, Optional
+
+from psycopg2.extras import Json
+from sqlalchemy import text
+
+from services.audit_service import write_audit_log
+from services.shipyard.manifest_parser import (
+    ManifestParseError,
+    ParsedInboundWorkbook,
+    parse_inbound_workbook,
+)
+
+
+class ShipyardServiceError(Exception):
+    code = "shipyard_error"
+    status_code = 400
+
+    def __init__(self, message: str, details: Optional[dict[str, Any]] = None):
+        super().__init__(message)
+        self.message = message
+        self.details = details or {}
+
+
+class DuplicateManifestFileError(ShipyardServiceError):
+    code = "duplicate_manifest_file"
+    status_code = 409
+
+
+class ManifestNotFoundError(ShipyardServiceError):
+    code = "manifest_not_found"
+    status_code = 404
+
+
+class ManifestStateError(ShipyardServiceError):
+    code = "manifest_state_conflict"
+    status_code = 409
+
+
+class ZoneConfigurationError(ShipyardServiceError):
+    code = "zone_configuration_required"
+    status_code = 422
+
+
+class WarehouseNotFoundError(ShipyardServiceError):
+    code = "warehouse_not_found"
+    status_code = 404
+
+
+def _iso(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _decimal_text(value: Any) -> str:
+    if value is None:
+        return "0"
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    return str(value)
+
+
+def _location_path(zone_code: Any, bin_code: Any) -> str:
+    parts = [str(value).strip() for value in (zone_code, bin_code) if value]
+    return " / ".join(dict.fromkeys(parts))
+
+
+def _zone_rows_for_ships(db, warehouse_id: int, ship_nos: list[str]):
+    if not ship_nos:
+        return {}
+    rows = db.execute(
+        text(
+            """
+            SELECT m.mapping_id, m.ship_no, m.bin_id,
+                   b.bin_code, b.warehouse_id,
+                   z.zone_code, z.zone_name,
+                   m.effective_from, m.effective_to
+              FROM shipyard_zone_ship_mappings m
+              JOIN bins b ON b.bin_id = m.bin_id
+              LEFT JOIN zones z ON z.zone_id = b.zone_id
+             WHERE m.status = 'ACTIVE'
+               AND m.is_primary = TRUE
+               AND m.ship_no = ANY(:ship_nos)
+             ORDER BY m.ship_no
+            """
+        ),
+        {"ship_nos": ship_nos},
+    ).fetchall()
+    return {row.ship_no: row for row in rows if row.warehouse_id == warehouse_id}
+
+
+def _binding_rows_for_ships(db, ship_nos: list[str]):
+    if not ship_nos:
+        return {}
+    rows = db.execute(
+        text(
+            """
+            SELECT binding_id, ship_no, engineering_no,
+                   production_drawing_no, manufacturer_name,
+                   effective_from, effective_to
+              FROM shipyard_project_bindings
+             WHERE status = 'ACTIVE'
+               AND ship_no = ANY(:ship_nos)
+             ORDER BY ship_no, engineering_no, production_drawing_no,
+                      manufacturer_name
+            """
+        ),
+        {"ship_nos": ship_nos},
+    ).fetchall()
+    grouped: dict[str, list[Any]] = {}
+    for row in rows:
+        grouped.setdefault(row.ship_no, []).append(row)
+    return grouped
+
+
+def _binding_status(line, bindings: dict[str, list[Any]]) -> dict[str, Any]:
+    candidates = bindings.get(line.ship_no, [])
+    if not candidates:
+        return {
+            "status": "NOT_CONFIGURED",
+            "message": "该船号尚未配置船号/工程号/制作图绑定",
+        }
+
+    for binding in candidates:
+        engineering_matches = (
+            not line.engineering_no
+            or binding.engineering_no == line.engineering_no
+        )
+        drawing_matches = (
+            not line.production_drawing_no
+            or binding.production_drawing_no == line.production_drawing_no
+        )
+        manufacturer_matches = (
+            not line.manufacturer_name
+            or not binding.manufacturer_name
+            or binding.manufacturer_name == line.manufacturer_name
+        )
+        if engineering_matches and drawing_matches and manufacturer_matches:
+            return {
+                "status": "MATCHED",
+                "binding_id": binding.binding_id,
+            }
+
+    return {
+        "status": "MISMATCH",
+        "message": "清单字段与现有绑定不一致",
+    }
+
+
+def _manifest_header(db, manifest_id: str):
+    return db.execute(
+        text(
+            """
+            SELECT manifest_id, warehouse_id, manifest_no, source_type,
+                   source_file_name, source_file_sha256,
+                   source_template_version, original_file_url, status,
+                   metadata, created_by, created_at, updated_at
+              FROM shipyard_inbound_manifests
+             WHERE manifest_id = :manifest_id
+            """
+        ),
+        {"manifest_id": manifest_id},
+    ).fetchone()
+
+
+def _manifest_lines(db, manifest_id: str):
+    return db.execute(
+        text(
+            """
+            SELECT line_id, source_row_no, source_row_hash, ship_no,
+                   engineering_no, production_drawing_no, drawing_name,
+                   manufacturer_name, delivery_note_no, po_no,
+                   item_name, item_spec, unit, declared_quantity,
+                   assigned_bin_id, raw_data, status, created_at, updated_at
+              FROM shipyard_inbound_lines
+             WHERE manifest_id = :manifest_id
+             ORDER BY COALESCE((raw_data->>'excel_row')::int, 0),
+                      source_row_no
+            """
+        ),
+        {"manifest_id": manifest_id},
+    ).fetchall()
+
+
+def get_manifest_payload(db, manifest_id: str) -> dict[str, Any]:
+    manifest = _manifest_header(db, manifest_id)
+    if manifest is None:
+        raise ManifestNotFoundError("入库清单不存在")
+    lines = _manifest_lines(db, manifest_id)
+    ship_nos = sorted({line.ship_no for line in lines})
+    zones = _zone_rows_for_ships(db, manifest.warehouse_id, ship_nos)
+    bindings = _binding_rows_for_ships(db, ship_nos)
+
+    missing_zone_ships: list[str] = []
+    line_payloads = []
+    for line in lines:
+        zone = zones.get(line.ship_no)
+        if zone is None:
+            missing_zone_ships.append(line.ship_no)
+        line_payloads.append(
+            {
+                "line_id": str(line.line_id),
+                "source_row_no": line.source_row_no,
+                "ship_no": line.ship_no,
+                "engineering_no": line.engineering_no,
+                "production_drawing_no": line.production_drawing_no,
+                "drawing_name": line.drawing_name,
+                "manufacturer_name": line.manufacturer_name,
+                "delivery_note_no": line.delivery_note_no,
+                "po_no": line.po_no,
+                "item_name": line.item_name,
+                "item_spec": line.item_spec,
+                "unit": line.unit,
+                "declared_quantity": _decimal_text(line.declared_quantity),
+                "assigned_bin_id": line.assigned_bin_id,
+                "suggested_bin": (
+                    {
+                        "bin_id": zone.bin_id,
+                        "bin_code": zone.bin_code,
+                        "zone_code": zone.zone_code,
+                        "zone_name": zone.zone_name,
+                        "location_path": _location_path(
+                            zone.zone_code, zone.bin_code
+                        ),
+                    }
+                    if zone
+                    else None
+                ),
+                "zone_status": "READY" if zone else "MISSING",
+                "binding": _binding_status(line, bindings),
+                "status": line.status,
+                "raw_data": line.raw_data,
+            }
+        )
+
+    tickets = db.execute(
+        text(
+            """
+            SELECT t.ticket_id, t.ticket_no, t.inbound_line_id,
+                   t.declared_quantity, t.assigned_bin_id,
+                   t.location_path_snapshot, t.stock_lot_number, t.status
+              FROM shipyard_cargo_tickets t
+              JOIN shipyard_inbound_lines l
+                ON l.line_id = t.inbound_line_id
+             WHERE l.manifest_id = :manifest_id
+             ORDER BY t.created_at, t.ticket_no
+            """
+        ),
+        {"manifest_id": manifest_id},
+    ).fetchall()
+
+    can_confirm = (
+        manifest.status == "PARSED"
+        and bool(line_payloads)
+        and not missing_zone_ships
+    )
+    blocking_errors = []
+    if missing_zone_ships:
+        blocking_errors.append(
+            {
+                "code": "ZONE_CONFIGURATION_REQUIRED",
+                "ship_nos": sorted(set(missing_zone_ships)),
+                "message": "以下船号未配置唯一的主入库二级区域",
+            }
+        )
+
+    return {
+        "manifest": {
+            "manifest_id": str(manifest.manifest_id),
+            "warehouse_id": manifest.warehouse_id,
+            "manifest_no": manifest.manifest_no,
+            "source_type": manifest.source_type,
+            "source_file_name": manifest.source_file_name,
+            "source_file_sha256": manifest.source_file_sha256,
+            "source_template_version": manifest.source_template_version,
+            "original_file_url": manifest.original_file_url,
+            "status": manifest.status,
+            "metadata": manifest.metadata,
+            "created_by": manifest.created_by,
+            "created_at": _iso(manifest.created_at),
+            "updated_at": _iso(manifest.updated_at),
+        },
+        "lines": line_payloads,
+        "tickets": [
+            {
+                "ticket_id": str(ticket.ticket_id),
+                "ticket_no": ticket.ticket_no,
+                "inbound_line_id": str(ticket.inbound_line_id),
+                "declared_quantity": _decimal_text(ticket.declared_quantity),
+                "assigned_bin_id": ticket.assigned_bin_id,
+                "location_path_snapshot": ticket.location_path_snapshot,
+                "stock_lot_number": ticket.stock_lot_number,
+                "status": ticket.status,
+            }
+            for ticket in tickets
+        ],
+        "validation": {
+            "can_confirm": can_confirm,
+            "missing_zone_ship_nos": sorted(set(missing_zone_ships)),
+            "blocking_errors": blocking_errors,
+            "summary": {
+                "line_count": len(line_payloads),
+                "ship_count": len(ship_nos),
+                "total_quantity": format(
+                    sum(
+                        (line.declared_quantity for line in lines),
+                        Decimal("0"),
+                    ),
+                    "f",
+                ),
+            },
+        },
+    }
+
+
+def _check_warehouse(db, warehouse_id: int) -> None:
+    row = db.execute(
+        text(
+            """
+            SELECT warehouse_id
+              FROM warehouses
+             WHERE warehouse_id = :warehouse_id
+               AND is_active = TRUE
+            """
+        ),
+        {"warehouse_id": warehouse_id},
+    ).fetchone()
+    if row is None:
+        raise WarehouseNotFoundError("仓库不存在或已停用")
+
+
+def _parse_or_raise(
+    content: bytes,
+    manufacturer_name: Optional[str],
+    source_file_name: str,
+) -> ParsedInboundWorkbook:
+    try:
+        return parse_inbound_workbook(
+            content,
+            manufacturer_name=manufacturer_name,
+            source_file_name=source_file_name,
+        )
+    except ManifestParseError:
+        raise
+
+
+def create_manifest_preview(
+    db,
+    *,
+    warehouse_id: int,
+    manifest_no: Optional[str],
+    source_file_name: str,
+    content: bytes,
+    manufacturer_name: Optional[str],
+    created_by: str,
+) -> dict[str, Any]:
+    _check_warehouse(db, warehouse_id)
+    file_hash = hashlib.sha256(content).hexdigest()
+    existing = db.execute(
+        text(
+            """
+            SELECT manifest_id
+              FROM shipyard_inbound_manifests
+             WHERE warehouse_id = :warehouse_id
+               AND source_file_sha256 = :file_hash
+            """
+        ),
+        {"warehouse_id": warehouse_id, "file_hash": file_hash},
+    ).fetchone()
+    if existing is not None:
+        raise DuplicateManifestFileError(
+            "该清单文件已经导入",
+            {"manifest_id": str(existing.manifest_id)},
+        )
+
+    parsed = _parse_or_raise(content, manufacturer_name, source_file_name)
+    generated_manifest_no = (
+        (manifest_no or "").strip()
+        or f"IN-{datetime.now(timezone.utc):%Y%m%d}-{file_hash[:8].upper()}"
+    )
+    if len(generated_manifest_no) > 128:
+        raise ShipyardServiceError("清单编号不能超过 128 个字符")
+
+    conflict = db.execute(
+        text(
+            """
+            SELECT manifest_id
+              FROM shipyard_inbound_manifests
+             WHERE warehouse_id = :warehouse_id
+               AND manifest_no = :manifest_no
+            """
+        ),
+        {"warehouse_id": warehouse_id, "manifest_no": generated_manifest_no},
+    ).fetchone()
+    if conflict is not None:
+        raise ShipyardServiceError(
+            "同一仓库内清单编号已存在",
+            {"manifest_id": str(conflict.manifest_id)},
+        )
+
+    manifest = db.execute(
+        text(
+            """
+            INSERT INTO shipyard_inbound_manifests
+                (warehouse_id, manifest_no, source_type, source_file_name,
+                 source_file_sha256, source_template_version, metadata,
+                 status, created_by)
+            VALUES
+                (:warehouse_id, :manifest_no, 'EXCEL', :source_file_name,
+                 :source_file_sha256, 'shipyard-excel-v1', :metadata,
+                 'PARSED', :created_by)
+            RETURNING manifest_id
+            """
+        ),
+        {
+            "warehouse_id": warehouse_id,
+            "manifest_no": generated_manifest_no,
+            "source_file_name": source_file_name[:255],
+            "source_file_sha256": file_hash,
+            "metadata": Json(parsed.metadata),
+            "created_by": created_by,
+        },
+    ).fetchone()
+    manifest_id = manifest.manifest_id
+
+    for line in parsed.lines:
+        db.execute(
+            text(
+                """
+                INSERT INTO shipyard_inbound_lines
+                    (manifest_id, source_row_no, source_row_hash, ship_no,
+                     engineering_no, production_drawing_no, drawing_name,
+                     manufacturer_name, delivery_note_no, po_no, item_name,
+                     item_spec, unit, declared_quantity, raw_data, status)
+                VALUES
+                    (:manifest_id, :source_row_no, :source_row_hash, :ship_no,
+                     :engineering_no, :production_drawing_no, :drawing_name,
+                     :manufacturer_name, :delivery_note_no, :po_no, :item_name,
+                     :item_spec, :unit, :declared_quantity, :raw_data,
+                     'PENDING')
+                """
+            ),
+            {
+                "manifest_id": manifest_id,
+                "source_row_no": line.source_row_no,
+                "source_row_hash": line.source_row_hash,
+                "ship_no": line.ship_no,
+                "engineering_no": line.engineering_no,
+                "production_drawing_no": line.production_drawing_no,
+                "drawing_name": line.drawing_name,
+                "manufacturer_name": line.manufacturer_name,
+                "delivery_note_no": line.delivery_note_no,
+                "po_no": line.po_no,
+                "item_name": line.item_name,
+                "item_spec": line.item_spec,
+                "unit": line.unit,
+                "declared_quantity": line.declared_quantity,
+                "raw_data": Json(line.raw_data),
+            },
+        )
+
+    write_audit_log(
+        db,
+        action_type="SHIPYARD_INBOUND_MANIFEST_PARSED",
+        entity_type="shipyard_inbound_manifest",
+        entity_id=0,
+        user_id=created_by,
+        warehouse_id=warehouse_id,
+        details={
+            "manifest_id": str(manifest_id),
+            "manifest_no": generated_manifest_no,
+            "source_file_sha256": file_hash,
+            "line_count": len(parsed.lines),
+        },
+    )
+    db.commit()
+    return get_manifest_payload(db, str(manifest_id))
+
+
+def confirm_manifest(db, *, manifest_id: str, confirmed_by: str) -> dict[str, Any]:
+    manifest = db.execute(
+        text(
+            """
+            SELECT manifest_id, warehouse_id, manifest_no, status
+              FROM shipyard_inbound_manifests
+             WHERE manifest_id = :manifest_id
+             FOR UPDATE
+            """
+        ),
+        {"manifest_id": manifest_id},
+    ).fetchone()
+    if manifest is None:
+        raise ManifestNotFoundError("入库清单不存在")
+    if manifest.status != "PARSED":
+        raise ManifestStateError(
+            "只有已解析、未确认的入库清单可以确认",
+            {"status": manifest.status},
+        )
+
+    lines = db.execute(
+        text(
+            """
+            SELECT line_id, source_row_no, ship_no, item_name,
+                   declared_quantity, assigned_bin_id
+              FROM shipyard_inbound_lines
+             WHERE manifest_id = :manifest_id
+             ORDER BY source_row_no
+             FOR UPDATE
+            """
+        ),
+        {"manifest_id": manifest_id},
+    ).fetchall()
+    if not lines:
+        raise ShipyardServiceError("入库清单没有明细行")
+
+    ship_nos = sorted({line.ship_no for line in lines})
+    zones = _zone_rows_for_ships(db, manifest.warehouse_id, ship_nos)
+    missing = [ship_no for ship_no in ship_nos if ship_no not in zones]
+    if missing:
+        raise ZoneConfigurationError(
+            "船号未配置唯一主入库区域，不能确认清单",
+            {"ship_nos": missing},
+        )
+
+    created_tickets = []
+    used_ticket_nos: set[str] = set()
+    for line in lines:
+        zone = zones[line.ship_no]
+        while True:
+            ticket_suffix = uuid.uuid4().hex[:12].upper()
+            ticket_no = f"SY-{datetime.now(timezone.utc):%Y%m%d}-{ticket_suffix}"
+            if ticket_no not in used_ticket_nos:
+                used_ticket_nos.add(ticket_no)
+                break
+        stock_lot_number = str(uuid.uuid4())
+        location_path = _location_path(zone.zone_code, zone.bin_code)
+        ticket = db.execute(
+            text(
+                """
+                INSERT INTO shipyard_cargo_tickets
+                    (ticket_no, inbound_line_id, declared_quantity,
+                     received_quantity, assigned_bin_id,
+                     location_path_snapshot, stock_lot_number, status,
+                     created_by)
+                VALUES
+                    (:ticket_no, :inbound_line_id, :declared_quantity,
+                     0, :assigned_bin_id, :location_path_snapshot,
+                     :stock_lot_number, 'EXPECTED', :created_by)
+                RETURNING ticket_id, ticket_no
+                """
+            ),
+            {
+                "ticket_no": ticket_no,
+                "inbound_line_id": line.line_id,
+                "declared_quantity": line.declared_quantity,
+                "assigned_bin_id": zone.bin_id,
+                "location_path_snapshot": location_path,
+                "stock_lot_number": stock_lot_number,
+                "created_by": confirmed_by,
+            },
+        ).fetchone()
+        db.execute(
+            text(
+                """
+                UPDATE shipyard_inbound_lines
+                   SET assigned_bin_id = :bin_id,
+                       updated_at = NOW()
+                 WHERE line_id = :line_id
+                """
+            ),
+            {"bin_id": zone.bin_id, "line_id": line.line_id},
+        )
+        created_tickets.append(
+            {
+                "ticket_id": str(ticket.ticket_id),
+                "ticket_no": ticket.ticket_no,
+                "source_row_no": line.source_row_no,
+                "ship_no": line.ship_no,
+                "assigned_bin_id": zone.bin_id,
+                "location_path_snapshot": location_path,
+            }
+        )
+
+    db.execute(
+        text(
+            """
+            UPDATE shipyard_inbound_manifests
+               SET status = 'CONFIRMED',
+                   updated_at = NOW()
+             WHERE manifest_id = :manifest_id
+            """
+        ),
+        {"manifest_id": manifest_id},
+    )
+    write_audit_log(
+        db,
+        action_type="SHIPYARD_INBOUND_MANIFEST_CONFIRMED",
+        entity_type="shipyard_inbound_manifest",
+        entity_id=0,
+        user_id=confirmed_by,
+        warehouse_id=manifest.warehouse_id,
+        details={
+            "manifest_id": manifest_id,
+            "manifest_no": manifest.manifest_no,
+            "ticket_count": len(created_tickets),
+        },
+    )
+    db.commit()
+    payload = get_manifest_payload(db, manifest_id)
+    payload["confirmed_tickets"] = created_tickets
+    return payload
+
+
+def list_manifests(db, *, warehouse_id: int, limit: int = 50) -> dict[str, Any]:
+    _check_warehouse(db, warehouse_id)
+    rows = db.execute(
+        text(
+            """
+            SELECT m.manifest_id, m.manifest_no, m.source_file_name,
+                   m.status, m.metadata, m.created_by, m.created_at,
+                   m.updated_at,
+                   COUNT(l.line_id) AS line_count,
+                   COALESCE(SUM(l.declared_quantity), 0) AS total_quantity
+              FROM shipyard_inbound_manifests m
+              LEFT JOIN shipyard_inbound_lines l
+                ON l.manifest_id = m.manifest_id
+             WHERE m.warehouse_id = :warehouse_id
+             GROUP BY m.manifest_id
+             ORDER BY m.created_at DESC
+             LIMIT :limit
+            """
+        ),
+        {"warehouse_id": warehouse_id, "limit": min(max(limit, 1), 200)},
+    ).fetchall()
+    return {
+        "manifests": [
+            {
+                "manifest_id": str(row.manifest_id),
+                "manifest_no": row.manifest_no,
+                "source_file_name": row.source_file_name,
+                "status": row.status,
+                "metadata": row.metadata,
+                "created_by": row.created_by,
+                "created_at": _iso(row.created_at),
+                "updated_at": _iso(row.updated_at),
+                "line_count": row.line_count,
+                "total_quantity": _decimal_text(row.total_quantity),
+            }
+            for row in rows
+        ]
+    }
