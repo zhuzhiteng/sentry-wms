@@ -25,6 +25,9 @@ from constants import (
     SHIPYARD_MANIFEST_VOID,
     SHIPYARD_STATUS_ACTIVE,
     SHIPYARD_TICKET_EXPECTED,
+    SHIPYARD_TICKET_IN_STOCK,
+    SHIPYARD_TICKET_OUTBOUND,
+    SHIPYARD_TICKET_PARTIAL,
 )
 from services.audit_service import write_audit_log
 from services.shipyard.errors import (
@@ -259,8 +262,15 @@ def get_manifest_payload(db, manifest_id: str) -> dict[str, Any]:
         text(
             """
             SELECT t.ticket_id, t.ticket_no, t.inbound_line_id,
-                   t.declared_quantity, t.assigned_bin_id,
+                   t.declared_quantity, t.received_quantity,
+                   t.on_hand_quantity, t.assigned_bin_id,
                    t.location_path_snapshot, t.stock_lot_number, t.status
+                   , t.shortage_status,
+                   (
+                       SELECT COUNT(*)
+                         FROM shipyard_pallet_units p
+                        WHERE p.ticket_id = t.ticket_id
+                   ) AS pallet_count
               FROM shipyard_cargo_tickets t
               JOIN shipyard_inbound_lines l
                 ON l.line_id = t.inbound_line_id
@@ -270,6 +280,36 @@ def get_manifest_payload(db, manifest_id: str) -> dict[str, Any]:
         ),
         {"manifest_id": manifest_id},
     ).fetchall()
+    ticket_payloads = [
+        {
+            "ticket_id": str(ticket.ticket_id),
+            "ticket_no": ticket.ticket_no,
+            "inbound_line_id": str(ticket.inbound_line_id),
+            "declared_quantity": _decimal_text(ticket.declared_quantity),
+            "received_quantity": _decimal_text(ticket.received_quantity),
+            "on_hand_quantity": _decimal_text(ticket.on_hand_quantity),
+            "short_quantity": _decimal_text(
+                max(ticket.declared_quantity - ticket.received_quantity, Decimal(0))
+            ),
+            "assigned_bin_id": ticket.assigned_bin_id,
+            "location_path_snapshot": ticket.location_path_snapshot,
+            "stock_lot_number": ticket.stock_lot_number,
+            "status": ticket.status,
+            "shortage_status": ticket.shortage_status,
+            "pallet_count": ticket.pallet_count,
+        }
+        for ticket in tickets
+    ]
+    received_ticket_count = sum(
+        ticket["status"] in (SHIPYARD_TICKET_IN_STOCK, SHIPYARD_TICKET_OUTBOUND)
+        for ticket in ticket_payloads
+    )
+    partial_ticket_count = sum(
+        ticket["status"] == SHIPYARD_TICKET_PARTIAL for ticket in ticket_payloads
+    )
+    pending_ticket_count = sum(
+        ticket["status"] == SHIPYARD_TICKET_EXPECTED for ticket in ticket_payloads
+    )
 
     can_confirm = (
         manifest.status == SHIPYARD_MANIFEST_PARSED
@@ -312,19 +352,7 @@ def get_manifest_payload(db, manifest_id: str) -> dict[str, Any]:
             "updated_at": _iso(manifest.updated_at),
         },
         "lines": line_payloads,
-        "tickets": [
-            {
-                "ticket_id": str(ticket.ticket_id),
-                "ticket_no": ticket.ticket_no,
-                "inbound_line_id": str(ticket.inbound_line_id),
-                "declared_quantity": _decimal_text(ticket.declared_quantity),
-                "assigned_bin_id": ticket.assigned_bin_id,
-                "location_path_snapshot": ticket.location_path_snapshot,
-                "stock_lot_number": ticket.stock_lot_number,
-                "status": ticket.status,
-            }
-            for ticket in tickets
-        ],
+        "tickets": ticket_payloads,
         "validation": {
             "can_confirm": can_confirm,
             "missing_zone_ship_nos": sorted(set(missing_zone_ships)),
@@ -339,6 +367,27 @@ def get_manifest_payload(db, manifest_id: str) -> dict[str, Any]:
                         Decimal(0),
                     ),
                     "f",
+                ),
+                "received_ticket_count": received_ticket_count,
+                "partial_ticket_count": partial_ticket_count,
+                "pending_ticket_count": pending_ticket_count,
+                "total_received_quantity": _decimal_text(
+                    sum(
+                        (ticket.received_quantity for ticket in tickets),
+                        Decimal(0),
+                    )
+                ),
+                "total_short_quantity": _decimal_text(
+                    sum(
+                        (
+                            max(
+                                ticket.declared_quantity - ticket.received_quantity,
+                                Decimal(0),
+                            )
+                            for ticket in tickets
+                        ),
+                        Decimal(0),
+                    )
                 ),
             },
         },
@@ -580,6 +629,7 @@ def confirm_manifest(db, *, manifest_id: str, confirmed_by: str) -> dict[str, An
     ship_nos = sorted({line.ship_no for line in lines})
     bindings = _binding_rows_for_ships(db, ship_nos)
     binding_errors = []
+    binding_ids_by_line: dict[Any, int] = {}
     for line in lines:
         status = _binding_status(line, bindings)
         if status["status"] != SHIPYARD_BINDING_MATCHED:
@@ -592,6 +642,8 @@ def confirm_manifest(db, *, manifest_id: str, confirmed_by: str) -> dict[str, An
                     **status,
                 }
             )
+        else:
+            binding_ids_by_line[line.line_id] = status["binding_id"]
     if binding_errors:
         raise BindingConfigurationError(
             "船号/工程号/制作图绑定未配置、冲突或不唯一，不能确认清单",
@@ -649,11 +701,16 @@ def confirm_manifest(db, *, manifest_id: str, confirmed_by: str) -> dict[str, An
                 """
                 UPDATE shipyard_inbound_lines
                    SET assigned_bin_id = :bin_id,
+                       project_binding_id = :project_binding_id,
                        updated_at = NOW()
                  WHERE line_id = :line_id
                 """
             ),
-            {"bin_id": zone.bin_id, "line_id": line.line_id},
+            {
+                "bin_id": zone.bin_id,
+                "project_binding_id": binding_ids_by_line[line.line_id],
+                "line_id": line.line_id,
+            },
         )
         created_tickets.append(
             {

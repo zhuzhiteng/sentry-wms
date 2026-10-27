@@ -25,14 +25,16 @@ from services.shipyard.manifest_service import (
     list_manifests,
     void_manifest,
 )
+from utils.uploads import (
+    UploadTooLargeError,
+    read_upload_bytes,
+    safe_upload_name,
+)
 from utils.validation import validate_body
 
 from . import shipyard_bp
 
-
-def _safe_file_name(raw_name: str) -> str:
-    name = (raw_name or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
-    return name[:255]
+XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 @shipyard_bp.get("/inbound/manifests")
@@ -67,7 +69,10 @@ def preview_inbound_manifest():
     uploaded = request.files.get("file")
     if uploaded is None or not uploaded.filename:
         return jsonify({"error": "file_required"}), 400
-    source_file_name = _safe_file_name(uploaded.filename)
+    source_file_name = safe_upload_name(
+        uploaded.filename,
+        fallback="manifest.xlsx",
+    )
     if not source_file_name.lower().endswith(".xlsx"):
         return jsonify(
             {
@@ -84,7 +89,10 @@ def preview_inbound_manifest():
     if not ok:
         return denied
 
-    content = uploaded.read()
+    try:
+        content = read_upload_bytes(uploaded)
+    except UploadTooLargeError as exc:
+        return jsonify({"error": "file_too_large", "message": str(exc)}), 413
     if not content:
         return jsonify({"error": "empty_file"}), 400
     try:
@@ -93,8 +101,7 @@ def preview_inbound_manifest():
             warehouse_id=warehouse_id,
             manifest_no=request.form.get("manifest_no"),
             source_file_name=source_file_name,
-            content_type=uploaded.mimetype
-            or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            content_type=XLSX_CONTENT_TYPE,
             content=content,
             manufacturer_name=request.form.get("manufacturer_name"),
             created_by=g.current_user["username"],

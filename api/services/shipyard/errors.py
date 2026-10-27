@@ -63,3 +63,33 @@ class WarehouseNotFoundError(ShipyardNotFoundError):
 
 class ConfigConflictError(ShipyardConflictError):
     code = "shipyard_config_conflict"
+
+
+class TicketNotFoundError(ShipyardNotFoundError):
+    code = "ticket_not_found"
+
+
+class TicketStateError(ShipyardStateError):
+    code = "ticket_state_conflict"
+
+
+class PalletValidationError(ShipyardServiceError):
+    code = "pallet_validation_failed"
+    status_code = 422
+
+
+class PalletDuplicateError(ShipyardConflictError):
+    code = "pallet_duplicate"
+
+
+class PhotoValidationError(ShipyardServiceError):
+    code = "photo_validation_failed"
+    status_code = 422
+
+
+class PhotoNotFoundError(ShipyardNotFoundError):
+    code = "photo_not_found"
+
+
+class ShortageStateError(ShipyardStateError):
+    code = "shortage_state_conflict"

@@ -36,4 +36,18 @@ def _integrity_error(exc):
     return jsonify(body), 409
 
 
-from routes.shipyard import config, inbound  # noqa: F401
+@shipyard_bp.errorhandler(SQLAlchemyError)
+def _database_error(exc):
+    try:
+        if g.db.is_active:
+            g.db.rollback()
+    except SQLAlchemyError:
+        _LOGGER.warning("Failed to roll back shipyard database error", exc_info=True)
+    _LOGGER.error(
+        "Shipyard database operation failed",
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    return jsonify({"error": "shipyard_database_unavailable"}), 503
+
+
+from routes.shipyard import config, inbound, receipts  # noqa: F401

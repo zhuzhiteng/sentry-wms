@@ -3,6 +3,9 @@
 本文记录船厂业务域的第一组可用接口。接口位于 `/api/shipyard`，复用
 Sentry WMS 的账号、仓库授权、审计日志和数据库事务。
 
+第二切片“扫码收货、照片证据、少件补货”见
+[`receipt-api.md`](receipt-api.md)。
+
 ## 已实现范围
 
 ### 船号/工程号/制作图绑定
@@ -112,5 +115,5 @@ docker compose exec -T `
   api python -m pytest tests/shipyard tests/test_082_shipyard_core_migration.py -q
 ```
 
-船厂业务、082/083 迁移及认证回归验证结果：`88 passed`。仅运行船厂业务与
-082/083 迁移时为 `41 passed`，`services/shipyard` 覆盖率为 91%。
+船厂业务、082-084 迁移及认证回归验证结果：`110 passed`。仅运行船厂业务与
+082-084 迁移时为 `54 passed`，`services/shipyard` 覆盖率为 90%。

@@ -44,6 +44,10 @@ nav:
   - Connectors: connectors.md
   - ERP Integration: erp-integration.md
   - Transfer Orders: transfer-orders.md
+  - 船厂仓储:
+      - 基线与状态: shipyard/baseline.md
+      - 入库清单: shipyard/inbound-api.md
+      - 扫码收货: shipyard/receipt-api.md
   - Test Lab: test-lab.md
   - Contributing: contributing.md
   - Changelog: changelog.md
