@@ -1,7 +1,9 @@
 import uuid
+from io import BytesIO
 
 from db_test_context import get_raw_connection
 from shipyard.helpers import (
+    PNG_BYTES,
     create_binding,
     create_zone_mapping,
     outbound_manifest_bytes,
@@ -14,6 +16,9 @@ from shipyard.helpers import (
     upload_outbound_photo,
     upload_ticket_photo,
 )
+
+from services.shipyard import outbound_turnover_service
+from services.shipyard.label_ocr import LabelOcrResult
 
 
 def _confirm_manifest(client, headers, manifest_id):
@@ -191,6 +196,74 @@ def test_outbound_binding_mismatch_names_the_conflicting_field(
     assert line["binding"]["status"] == "MISMATCH"
     assert line["binding"]["mismatched_fields"] == ["manufacturer_name"]
     assert "厂家" in line["binding"]["message"]
+
+
+def test_ocr_wrong_task_returns_the_candidate_task(
+    client,
+    auth_headers,
+    monkeypatch,
+):
+    first_ticket = _received_material_ticket(
+        client,
+        auth_headers,
+        material_code="MAT-FIRST",
+        item_name="首票物料",
+    )
+    second_ticket = _received_material_ticket(
+        client,
+        auth_headers,
+        material_code="MAT-SECOND",
+        item_name="第二票物料",
+    )
+    _first_manifest, first_order = _preview_and_confirm_outbound(
+        client,
+        auth_headers,
+        ship_no=first_ticket["ship_no"],
+        material_code="MAT-FIRST",
+        item_name="首票物料",
+    )
+    _second_manifest, second_order = _preview_and_confirm_outbound(
+        client,
+        auth_headers,
+        ship_no=second_ticket["ship_no"],
+        material_code="MAT-SECOND",
+        item_name="第二票物料",
+    )
+    first_task = first_order["tasks"][0]
+    second_task = second_order["tasks"][0]
+    monkeypatch.setattr(
+        outbound_turnover_service,
+        "recognize_label_image",
+        lambda _content: LabelOcrResult(
+            provider="e2e-stub",
+            raw_text="",
+            raw_lines=[],
+            fields={
+                "material_code": "MAT-SECOND",
+                "item_name": "第二票物料",
+                "tag_suffix": "1-1",
+                "label_quantity": "4",
+            },
+            confidence=0.99,
+        ),
+    )
+
+    response = client.post(
+        f"/api/shipyard/outbound/tasks/{first_task['task_id']}/label-recognition",
+        data={"file": (BytesIO(PNG_BYTES), "wrong-task.png")},
+        content_type="multipart/form-data",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 201, response.get_json()
+    data = response.get_json()
+    assert data["matched"] is False
+    assert {
+        item["field"] for item in data["mismatches"] if item["reason"] == "MISMATCH"
+    } >= {"material_code", "item_name"}
+    assert [item["task_id"] for item in data["candidate_tasks"]] == [
+        second_task["task_id"]
+    ]
 
 
 def test_whole_ticket_outbound_photos_stock_and_loading(
@@ -585,6 +658,18 @@ def test_outbound_role_can_use_mobile_tasks_but_cannot_import(
         headers=auth_headers,
     )
     assert user.status_code == 201, user.get_json()
+    permissions = client.put(
+        f"/api/admin/users/{user.get_json()['user_id']}/permissions",
+        json={
+            "page_keys": [
+                "dashboard",
+                "inventory",
+                "shipyard-outbound",
+            ]
+        },
+        headers=auth_headers,
+    )
+    assert permissions.status_code == 200, permissions.get_json()
     role_login = client.post(
         "/api/auth/login",
         json={"username": username, "password": "RoleDemo2026!"},

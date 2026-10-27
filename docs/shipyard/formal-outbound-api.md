@@ -107,6 +107,11 @@ GET /api/shipyard/outbound/mobile/orders?warehouse_id=1
 GET /api/shipyard/outbound/mobile/orders/<outbound_order_id>
 ```
 
+移动端接口同时校验角色和 `shipyard-outbound` 页面权限。列表、详情、吊牌拍照识别、
+旧扫码/照片兼容接口、整票确认、装车确认和出库照片下载都受同一门禁保护；只有
+`OUTBOUND` 角色但没有页面权限时返回 `403`。知道有效的任务或照片 ID 也不能绕过
+页面权限。
+
 出库单状态：
 
 - `PENDING`：已生成，等待现场出库；
@@ -258,10 +263,12 @@ HTTPS API 域名、微信 request/uploadFile 合法域名和真实 AppID。
 
 ## 验证
 
-- 全后端：`3043 passed, 55 skipped, 11 warnings`；
+- 全后端：`3045 passed, 55 skipped, 11 warnings`；
 - 087 迁移在 `sentry_test` 连续执行两次成功；
 - 全新空库执行 `db/schema.sql` 后，正式出库、任务、核销和装车 4 类核心表均存在；
-- 管理端：32 个测试文件、203 项测试通过，生产构建通过；
+- 管理端：32 个测试文件、203 项测试通过，生产构建通过；当前 Windows 主机上
+  默认并行模式会触发 Vitest fork/jsdom 超时，因此全量以 4 个分片、单 worker
+  运行；超时文件单独重跑均通过，未发现页面断言缺陷；
 - 微信小程序：17 项 Node 测试通过，触及 JavaScript 文件语法检查通过；
 - 触及 Python 文件 Ruff、格式检查、Bandit 和 `git diff --check` 通过；
 - `pip-audit` 无已知漏洞，`npm audit` 为 0 个漏洞。
@@ -274,4 +281,6 @@ OCR、小程序真机和现场吊牌 UAT。
 
 可重复的真实 HTTP E2E 由 `api/tests/e2e_shipyard_http.py` 执行。该脚本会启动
 本机回环 Flask 服务，完整走登录、配置、清单确认、两托 OCR 收货、缺后缀补选、
-整票扣库、装车、后台重新查询和原图字节校验；结束后恢复测试库种子数据。
+整票扣库、装车、后台重新查询和原图字节校验；同时覆盖缺托、重复照片、错误物料
+编码/品名、OCR provider 失败、角色和页面权限、跨仓库隔离、同幂等键并发、新幂等键
+重复操作 `409`，以及并发装车只写一次。结束后恢复测试库种子数据。

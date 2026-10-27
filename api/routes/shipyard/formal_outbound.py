@@ -269,6 +269,7 @@ def get_formal_outbound_order(outbound_order_id):
 @shipyard_bp.get("/outbound/mobile/orders")
 @require_auth
 @require_shipyard_roles(*FORMAL_OUTBOUND_MOBILE_ROLES)
+@require_admin_or_page_permission(OUTBOUND_PAGE)
 @with_db
 def get_mobile_outbound_orders():
     try:
@@ -291,6 +292,7 @@ def get_mobile_outbound_orders():
 @shipyard_bp.get("/outbound/mobile/orders/<uuid:outbound_order_id>")
 @require_auth
 @require_shipyard_roles(*FORMAL_OUTBOUND_MOBILE_ROLES)
+@require_admin_or_page_permission(OUTBOUND_PAGE)
 @with_db
 def get_mobile_outbound_order(outbound_order_id):
     payload = get_outbound_order_payload(
@@ -306,6 +308,7 @@ def get_mobile_outbound_order(outbound_order_id):
 @shipyard_bp.post("/outbound/tasks/<uuid:task_id>/scan")
 @require_auth
 @require_shipyard_roles(*FORMAL_OUTBOUND_MOBILE_ROLES)
+@require_admin_or_page_permission(OUTBOUND_PAGE)
 @validate_body(OutboundPalletScanRequest)
 @with_db
 def scan_outbound_pallet(task_id, validated):
@@ -324,6 +327,7 @@ def scan_outbound_pallet(task_id, validated):
 @shipyard_bp.post("/outbound/tasks/<uuid:task_id>/label-recognition")
 @require_auth
 @require_shipyard_roles(*FORMAL_OUTBOUND_MOBILE_ROLES)
+@require_admin_or_page_permission(OUTBOUND_PAGE)
 @with_db
 def recognize_outbound_label(task_id):
     if not request.mimetype.startswith("multipart/form-data"):
@@ -361,6 +365,7 @@ def recognize_outbound_label(task_id):
 @shipyard_bp.post("/outbound/tasks/<uuid:task_id>/photos")
 @require_auth
 @require_shipyard_roles(*FORMAL_OUTBOUND_MOBILE_ROLES)
+@require_admin_or_page_permission(OUTBOUND_PAGE)
 @with_db
 def upload_outbound_task_photo(task_id):
     if not request.mimetype.startswith("multipart/form-data"):
@@ -399,6 +404,7 @@ def upload_outbound_task_photo(task_id):
 @shipyard_bp.post("/outbound/tasks/<uuid:task_id>/confirm")
 @require_auth
 @require_shipyard_roles(*FORMAL_OUTBOUND_MOBILE_ROLES)
+@require_admin_or_page_permission(OUTBOUND_PAGE)
 @validate_body(ConfirmOutboundTaskRequest)
 @with_db
 def confirm_shipyard_outbound_task(task_id, validated):
@@ -418,6 +424,7 @@ def confirm_shipyard_outbound_task(task_id, validated):
 @shipyard_bp.post("/outbound/orders/<uuid:outbound_order_id>/loading")
 @require_auth
 @require_shipyard_roles(*FORMAL_OUTBOUND_MOBILE_ROLES)
+@require_admin_or_page_permission(OUTBOUND_PAGE)
 @validate_body(ConfirmOutboundLoadingRequest)
 @with_db
 def confirm_shipyard_loading(outbound_order_id, validated):
@@ -440,6 +447,7 @@ def confirm_shipyard_loading(outbound_order_id, validated):
 @shipyard_bp.get("/outbound/photos/<uuid:photo_id>")
 @require_auth
 @require_shipyard_roles(*FORMAL_OUTBOUND_MOBILE_ROLES)
+@require_admin_or_page_permission(OUTBOUND_PAGE)
 @with_db
 def download_outbound_photo(photo_id):
     photo = get_outbound_photo(g.db, photo_id=str(photo_id))

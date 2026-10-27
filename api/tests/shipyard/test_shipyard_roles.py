@@ -121,6 +121,31 @@ def test_outbound_role_can_read_but_cannot_import_or_change_config(
     assert config.status_code == 403
 
 
+def test_outbound_mobile_requires_shipyard_outbound_page_permission(
+    client,
+    auth_headers,
+):
+    auth_headers = _login(client, "admin", "admin")
+    outbound_headers = _create_role_user(
+        client,
+        auth_headers,
+        role="OUTBOUND",
+        page_keys=["dashboard"],
+    )
+
+    listing = client.get(
+        "/api/shipyard/outbound/mobile/orders?warehouse_id=1",
+        headers=outbound_headers,
+    )
+    assert listing.status_code == 403
+
+    recognition = client.post(
+        f"/api/shipyard/outbound/tasks/{uuid.uuid4()}/label-recognition",
+        headers=outbound_headers,
+    )
+    assert recognition.status_code == 403
+
+
 def test_viewer_is_read_only(client, auth_headers):
     auth_headers = _login(client, "admin", "admin")
     viewer_headers = _create_role_user(

@@ -18,7 +18,10 @@
 2. 在 `project.config.json` 中替换正式小程序 AppID；本地可使用测试号。
 3. 登录页填写 API 根地址，例如 `https://wms.example.com/api`。正式环境必须使用
    HTTPS，并将域名加入微信小程序 request/uploadFile 合法域名。
-4. 为操作员配置 `RECEIVER` 或 `OUTBOUND` 角色，并确认账号已绑定仓库。
+4. 为操作员配置 `RECEIVER` 或 `OUTBOUND` 角色，并确认账号已绑定仓库。页面权限
+   分别需要包含 `inbound` 或 `shipyard-outbound`。正式出库的列表、详情、拍照
+   识别、整票核销、装车确认和照片下载同时校验角色与 `shipyard-outbound` 页面
+   权限，缺少页面权限会返回 `403`。
 
 本项目默认关闭开发者工具的域名校验，仅用于本地联调。生产构建不得依赖这一设置。
 

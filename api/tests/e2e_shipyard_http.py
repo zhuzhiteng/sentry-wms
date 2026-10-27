@@ -17,6 +17,7 @@ import json
 import os
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from urllib.parse import urlsplit
 
@@ -58,6 +59,7 @@ from services.shipyard import (
     outbound_turnover_service,
     receipt_service,
 )
+from services.shipyard.errors import OcrProviderError
 from services.shipyard.label_ocr import LabelOcrResult
 
 
@@ -71,6 +73,20 @@ def _ocr_result(fields: dict) -> LabelOcrResult:
     )
 
 
+def _label_files(file_name: str) -> dict:
+    return {
+        "file": (
+            file_name,
+            BytesIO(PNG_BYTES),
+            "image/png",
+        )
+    }
+
+
+def _raise_ocr_provider(_content):
+    raise OcrProviderError("E2E simulated OCR timeout")
+
+
 def _json(response: requests.Response, expected_status: int) -> dict:
     try:
         payload = response.json()
@@ -82,6 +98,79 @@ def _json(response: requests.Response, expected_status: int) -> dict:
             f"returned {response.status_code}: {payload}"
         )
     return payload
+
+
+def _login_session(api_base: str, username: str, password: str) -> requests.Session:
+    session = requests.Session()
+    login = _json(
+        session.post(
+            f"{api_base}/auth/login",
+            json={"username": username, "password": password},
+            timeout=10,
+        ),
+        200,
+    )
+    session.headers["Authorization"] = f"Bearer {login['token']}"
+    return session
+
+
+def _create_role_session(
+    admin_session: requests.Session,
+    api_base: str,
+    *,
+    run_id: str,
+    role: str,
+    page_keys: list[str],
+    warehouse_ids: list[int],
+) -> requests.Session:
+    username = f"e2e_{role.lower()}_{run_id.lower()}_{uuid.uuid4().hex[:4]}"
+    password = "ShipyardE2E2026!"
+    created = _json(
+        admin_session.post(
+            f"{api_base}/admin/users",
+            json={
+                "username": username,
+                "password": password,
+                "full_name": f"E2E {role}",
+                "role": role,
+                "warehouse_ids": warehouse_ids,
+            },
+            timeout=10,
+        ),
+        201,
+    )
+    _json(
+        admin_session.put(
+            f"{api_base}/admin/users/{created['user_id']}/permissions",
+            json={"page_keys": page_keys},
+            timeout=10,
+        ),
+        200,
+    )
+    return _login_session(api_base, username, password)
+
+
+def _parallel_json_posts(
+    api_base: str,
+    session: requests.Session,
+    path: str,
+    payload: dict,
+    *,
+    count: int = 2,
+) -> list[requests.Response]:
+    authorization = session.headers["Authorization"]
+
+    def post_once():
+        return requests.post(
+            f"{api_base}{path}",
+            json=payload,
+            headers={"Authorization": authorization},
+            timeout=30,
+        )
+
+    with ThreadPoolExecutor(max_workers=count) as executor:
+        futures = [executor.submit(post_once) for _ in range(count)]
+        return [future.result() for future in futures]
 
 
 def _first_bin_id() -> int:
@@ -214,6 +303,15 @@ def run() -> dict:
     outbound_ocr = [
         _ocr_result(
             {
+                "material_code": f"WRONG-{material_code}",
+                "item_name": f"错误-{item_name}",
+                "batch_no": f"{ship_no}-BATCH-1",
+                "tag_suffix": suffixes[0],
+                "label_quantity": "4",
+            }
+        ),
+        _ocr_result(
+            {
                 "material_code": material_code,
                 "item_name": item_name,
                 "batch_no": f"{ship_no}-BATCH-1",
@@ -238,16 +336,7 @@ def run() -> dict:
     steps = []
     try:
         with _ServerThread(app) as api_base:
-            session = requests.Session()
-            login = _json(
-                session.post(
-                    f"{api_base}/auth/login",
-                    json={"username": "admin", "password": "admin"},
-                    timeout=10,
-                ),
-                200,
-            )
-            session.headers["Authorization"] = f"Bearer {login['token']}"
+            session = _login_session(api_base, "admin", "admin")
             steps.append("管理员通过真实 HTTP 登录")
 
             _json(
@@ -352,25 +441,75 @@ def run() -> dict:
                     }
                 )
 
-            receipt = _json(
+            receipt_key = f"receipt-e2e-{run_id}"
+            receipt_payload = {
+                "idempotency_key": receipt_key,
+                "client_device_id": f"wx-e2e-{run_id}",
+                "received_quantity": 4,
+                "pallets": pallets,
+            }
+            _json(
                 session.post(
                     f"{api_base}/shipyard/inbound/tickets/"
                     f"{ticket['ticket_id']}/receipts",
                     json={
-                        "idempotency_key": f"receipt-e2e-{run_id}",
-                        "client_device_id": f"wx-e2e-{run_id}",
-                        "received_quantity": 4,
-                        "pallets": pallets,
+                        **receipt_payload,
+                        "idempotency_key": f"receipt-incomplete-{run_id}",
+                        "pallets": pallets[:1],
                     },
                     timeout=20,
                 ),
-                200,
+                422,
             )
+            _json(
+                session.post(
+                    f"{api_base}/shipyard/inbound/tickets/"
+                    f"{ticket['ticket_id']}/receipts",
+                    json={
+                        **receipt_payload,
+                        "idempotency_key": f"receipt-duplicate-photo-{run_id}",
+                        "pallets": [
+                            pallets[0],
+                            {
+                                **pallets[1],
+                                "photo_id": pallets[0]["photo_id"],
+                            },
+                        ],
+                    },
+                    timeout=20,
+                ),
+                404,
+            )
+            receipt_responses = _parallel_json_posts(
+                api_base,
+                session,
+                f"/shipyard/inbound/tickets/{ticket['ticket_id']}/receipts",
+                receipt_payload,
+            )
+            receipt_results = [_json(response, 200) for response in receipt_responses]
+            receipt_ids = {
+                result["receipt"]["receipt_id"] for result in receipt_results
+            }
+            if len(receipt_ids) != 1:
+                raise AssertionError(receipt_ids)
+            receipt = receipt_results[0]
             if receipt["ticket"]["on_hand_quantity"] != "4.000":
                 raise AssertionError(receipt["ticket"])
             if receipt["ticket"]["status"] != "IN_STOCK":
                 raise AssertionError(receipt["ticket"])
-            steps.append("逐托拍照 OCR 收货，两托各一次拍摄，库存 4.000")
+            _json(
+                session.post(
+                    f"{api_base}/shipyard/inbound/tickets/"
+                    f"{ticket['ticket_id']}/receipts",
+                    json={
+                        **receipt_payload,
+                        "idempotency_key": f"receipt-new-key-{run_id}",
+                    },
+                    timeout=20,
+                ),
+                409,
+            )
+            steps.append("缺托、复用照片被拦截；同键并发收货只落账一次，库存 4.000")
 
             outbound_preview = _json(
                 session.post(
@@ -408,6 +547,208 @@ def run() -> dict:
             )
             task = outbound_order["tasks"][0]
             steps.append("导入并确认正式出库清单，生成整票任务")
+
+            receiver_session = _create_role_session(
+                session,
+                api_base,
+                run_id=run_id,
+                role="RECEIVER",
+                page_keys=["dashboard", "inbound"],
+                warehouse_ids=[1],
+            )
+            outbound_session = _create_role_session(
+                session,
+                api_base,
+                run_id=run_id,
+                role="OUTBOUND",
+                page_keys=["dashboard", "inventory", "shipyard-outbound"],
+                warehouse_ids=[1],
+            )
+            viewer_session = _create_role_session(
+                session,
+                api_base,
+                run_id=run_id,
+                role="VIEWER",
+                page_keys=[
+                    "dashboard",
+                    "inventory",
+                    "inbound",
+                    "shipyard-outbound",
+                    "audit-log",
+                ],
+                warehouse_ids=[1],
+            )
+            foreign_receiver = _create_role_session(
+                session,
+                api_base,
+                run_id=f"{run_id}R2",
+                role="RECEIVER",
+                page_keys=["dashboard", "inbound"],
+                warehouse_ids=[2],
+            )
+            foreign_outbound = _create_role_session(
+                session,
+                api_base,
+                run_id=f"{run_id}O2",
+                role="OUTBOUND",
+                page_keys=["dashboard", "inventory", "shipyard-outbound"],
+                warehouse_ids=[2],
+            )
+            receiver_without_page = _create_role_session(
+                session,
+                api_base,
+                run_id=f"{run_id}RN",
+                role="RECEIVER",
+                page_keys=["dashboard"],
+                warehouse_ids=[1],
+            )
+            outbound_without_page = _create_role_session(
+                session,
+                api_base,
+                run_id=f"{run_id}ON",
+                role="OUTBOUND",
+                page_keys=["dashboard"],
+                warehouse_ids=[1],
+            )
+
+            _json(
+                receiver_session.post(
+                    f"{api_base}/shipyard/inbound/tickets/{uuid.uuid4()}"
+                    "/label-recognition",
+                    files=_label_files("receiver-role-check.png"),
+                    timeout=10,
+                ),
+                404,
+            )
+            _json(
+                receiver_session.post(
+                    f"{api_base}/shipyard/outbound/tasks/{uuid.uuid4()}"
+                    "/label-recognition",
+                    files=_label_files("receiver-denied.png"),
+                    timeout=10,
+                ),
+                403,
+            )
+            _json(
+                outbound_session.post(
+                    f"{api_base}/shipyard/inbound/tickets/{uuid.uuid4()}"
+                    "/label-recognition",
+                    files=_label_files("outbound-denied.png"),
+                    timeout=10,
+                ),
+                403,
+            )
+            _json(
+                outbound_session.post(
+                    f"{api_base}/shipyard/outbound/tasks/{uuid.uuid4()}"
+                    "/label-recognition",
+                    files=_label_files("outbound-role-check.png"),
+                    timeout=10,
+                ),
+                404,
+            )
+            _json(
+                viewer_session.post(
+                    f"{api_base}/shipyard/inbound/tickets/{uuid.uuid4()}"
+                    "/label-recognition",
+                    files=_label_files("viewer-denied.png"),
+                    timeout=10,
+                ),
+                403,
+            )
+            _json(
+                foreign_receiver.post(
+                    f"{api_base}/shipyard/inbound/tickets/{ticket['ticket_id']}"
+                    "/label-recognition",
+                    files=_label_files("foreign-receiver-denied.png"),
+                    timeout=10,
+                ),
+                403,
+            )
+            _json(
+                foreign_outbound.post(
+                    f"{api_base}/shipyard/outbound/tasks/{task['task_id']}"
+                    "/label-recognition",
+                    files=_label_files("foreign-outbound-denied.png"),
+                    timeout=10,
+                ),
+                403,
+            )
+            _json(
+                receiver_without_page.post(
+                    f"{api_base}/shipyard/inbound/tickets/{uuid.uuid4()}"
+                    "/label-recognition",
+                    files=_label_files("receiver-no-page.png"),
+                    timeout=10,
+                ),
+                403,
+            )
+            _json(
+                outbound_without_page.post(
+                    f"{api_base}/shipyard/outbound/tasks/{uuid.uuid4()}"
+                    "/label-recognition",
+                    files=_label_files("outbound-no-page.png"),
+                    timeout=10,
+                ),
+                403,
+            )
+            _json(
+                outbound_session.get(
+                    f"{api_base}/shipyard/outbound/mobile/orders?warehouse_id=1",
+                    timeout=10,
+                ),
+                200,
+            )
+            _json(
+                viewer_session.get(
+                    f"{api_base}/shipyard/outbound/orders?warehouse_id=1",
+                    timeout=10,
+                ),
+                200,
+            )
+            steps.append("角色权限和跨仓库隔离通过")
+
+            outbound_turnover_service.recognize_label_image = _raise_ocr_provider
+            provider_failure = _json(
+                session.post(
+                    f"{api_base}/shipyard/outbound/tasks/"
+                    f"{task['task_id']}/label-recognition",
+                    files=_label_files("outbound-ocr-timeout.png"),
+                    timeout=10,
+                ),
+                502,
+            )
+            if (
+                provider_failure["recognition"]["status"] != "FAILED"
+                or provider_failure["photo"]["photo_id"]
+                != provider_failure["recognition"]["photo_id"]
+            ):
+                raise AssertionError(provider_failure)
+            outbound_turnover_service.recognize_label_image = lambda _content: (
+                outbound_ocr.pop(0)
+            )
+            steps.append("OCR 失败仍保留原图和 FAILED 记录，且不能核销")
+
+            wrong_label = _json(
+                session.post(
+                    f"{api_base}/shipyard/outbound/tasks/"
+                    f"{task['task_id']}/label-recognition",
+                    files=_label_files("outbound-wrong-material.png"),
+                    timeout=10,
+                ),
+                201,
+            )
+            wrong_fields = {
+                item["field"]
+                for item in wrong_label["mismatches"]
+                if item["reason"] == "MISMATCH"
+            }
+            if (
+                wrong_label["matched"]
+                or not {"material_code", "item_name"} <= wrong_fields
+            ):
+                raise AssertionError(wrong_label)
+            steps.append("错误物料编码/品名被OCR规则定位并拒绝核销")
 
             evidence = []
             first_recognition = _json(
@@ -466,38 +807,99 @@ def run() -> dict:
             )
             steps.append("第二托 OCR 一次匹配，无额外输入")
 
-            confirmed = _json(
+            outbound_key = f"outbound-e2e-{run_id}"
+            outbound_payload = {
+                "idempotency_key": outbound_key,
+                "client_device_id": f"wx-e2e-{run_id}",
+                "pallets": evidence,
+            }
+            _json(
                 session.post(
                     f"{api_base}/shipyard/outbound/tasks/{task['task_id']}/confirm",
                     json={
-                        "idempotency_key": f"outbound-e2e-{run_id}",
-                        "client_device_id": f"wx-e2e-{run_id}",
-                        "pallets": evidence,
+                        **outbound_payload,
+                        "idempotency_key": f"outbound-incomplete-{run_id}",
+                        "pallets": evidence[:1],
                     },
                     timeout=20,
                 ),
-                200,
+                422,
             )
+            _json(
+                session.post(
+                    f"{api_base}/shipyard/outbound/tasks/{task['task_id']}/confirm",
+                    json={
+                        **outbound_payload,
+                        "idempotency_key": f"outbound-duplicate-photo-{run_id}",
+                        "pallets": [
+                            evidence[0],
+                            {
+                                **evidence[1],
+                                "photo_id": evidence[0]["photo_id"],
+                            },
+                        ],
+                    },
+                    timeout=20,
+                ),
+                404,
+            )
+            outbound_responses = _parallel_json_posts(
+                api_base,
+                session,
+                f"/shipyard/outbound/tasks/{task['task_id']}/confirm",
+                outbound_payload,
+            )
+            outbound_results = [_json(response, 200) for response in outbound_responses]
+            confirmation_ids = {
+                result["confirmation"]["confirmation_id"] for result in outbound_results
+            }
+            if len(confirmation_ids) != 1:
+                raise AssertionError(confirmation_ids)
+            confirmed = outbound_results[0]
             if confirmed["confirmation"]["balance_after"] != "0.000":
                 raise AssertionError(confirmed["confirmation"])
-            steps.append("整票两张照片核销，库存扣减到 0.000")
+            _json(
+                session.post(
+                    f"{api_base}/shipyard/outbound/tasks/{task['task_id']}/confirm",
+                    json={
+                        **outbound_payload,
+                        "idempotency_key": f"outbound-new-key-{run_id}",
+                    },
+                    timeout=20,
+                ),
+                409,
+            )
+            steps.append("缺托和复用照片被拦截；同键并发核销只扣库一次")
 
-            loaded = _json(
+            loading_key = f"loading-e2e-{run_id}"
+            loading_payload = {
+                "idempotency_key": loading_key,
+                "client_device_id": f"wx-e2e-{run_id}",
+                "notes": "E2E 两托已装车",
+            }
+            loading_responses = _parallel_json_posts(
+                api_base,
+                session,
+                f"/shipyard/outbound/orders/"
+                f"{outbound_order['order']['outbound_order_id']}/loading",
+                loading_payload,
+            )
+            loading_results = [_json(response, 200) for response in loading_responses]
+            if any(result["order"]["status"] != "LOADED" for result in loading_results):
+                raise AssertionError(loading_results)
+            _json(
                 session.post(
                     f"{api_base}/shipyard/outbound/orders/"
                     f"{outbound_order['order']['outbound_order_id']}/loading",
                     json={
-                        "idempotency_key": f"loading-e2e-{run_id}",
-                        "client_device_id": f"wx-e2e-{run_id}",
-                        "notes": "E2E 两托已装车",
+                        **loading_payload,
+                        "idempotency_key": f"loading-new-key-{run_id}",
                     },
                     timeout=20,
                 ),
-                200,
+                409,
             )
-            if loaded["order"]["status"] != "LOADED":
-                raise AssertionError(loaded["order"])
-            steps.append("整单装车确认，出库单进入 LOADED")
+            steps.append("同键并发装车只写一次，整单进入 LOADED")
 
             refreshed_order = _json(
                 session.get(

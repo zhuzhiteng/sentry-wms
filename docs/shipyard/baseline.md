@@ -55,13 +55,19 @@ Windows.
 Commands use a dedicated `sentry_test` database.
 
 ```text
-Backend: 3043 passed, 55 skipped, 11 warnings
+Backend: 3045 passed, 55 skipped, 11 warnings
 Admin:   32 test files passed, 203 tests passed
 Miniprogram: 17 tests passed
 Admin build: production build passed
 Schema:  087 applied twice to test; fresh db/schema.sql created
-HTTP E2E: passed (two-pallet OCR receipt → whole-ticket outbound → LOADED)
+HTTP E2E: passed (abnormal, permission, warehouse and concurrency paths)
 ```
+
+The admin suite passed as four serialized-worker shards: each shard ran eight
+files with `--no-file-parallelism`. The default parallel invocation on this
+Windows host hit Vitest fork startup and jsdom timeout failures; every affected
+file passed when rerun alone, so this is recorded as a test-host stability
+limitation rather than a product assertion failure.
 
 The API test command must override the container's production environment:
 
@@ -84,10 +90,13 @@ docker compose exec -T `
 ```
 
 It starts a loopback Flask server, then performs login, binding/zone setup,
-inbound manifest confirmation, two OCR receipts, formal-outbound confirmation,
-two OCR scans with a missing-suffix recovery, stock depletion, loading
-confirmation, refreshed backend reads and photo-byte verification. OCR is a
-deterministic test stub because CI has no public-cloud credentials.
+inbound manifest confirmation and concurrent receipt idempotency, formal
+outbound confirmation, wrong-material-name rejection, OCR provider failure with
+photo/FAILED-record retention, missing-suffix recovery, stock depletion,
+concurrent loading idempotency, refreshed backend reads and photo-byte
+verification. It also verifies role/page permission gates and cross-warehouse
+isolation. OCR is a deterministic test stub because CI has no public-cloud
+credentials.
 
 The development override avoids production-only webhook SSRF startup guards.
 It does not disable authentication, tenant checks, or inventory locking.
@@ -95,7 +104,9 @@ It does not disable authentication, tenant checks, or inventory locking.
 ## Dependency findings
 
 The shipyard dependency review upgraded Vite to 8.3.5, Vitest to 4.1.12,
-PyJWT to 2.15.0, and refreshed the remaining locked transitive packages.
+PyJWT to 2.15.0, and refreshed the remaining locked transitive packages. The
+API image now pins `pip` 26.2.2 and `setuptools` 84.2.1 to clear advisories
+inherited from the Python base image.
 
 - `pip-audit`: no known vulnerabilities;
 - `npm audit`: 0 vulnerabilities;
@@ -141,3 +152,9 @@ Migration `086_shipyard_formal_outbound.sql` is idempotent and the consolidated
 schema contains the same structures. Generic Sentry `items` / `inventory`
 synchronization remains deferred until the shipyard material-code mapping is
 agreed.
+
+The formal-outbound mobile routes require both a shipyard mobile role and the
+`shipyard-outbound` page permission. This includes list/detail reads, photo OCR,
+legacy scan/photo compatibility routes, whole-ticket confirmation, loading
+confirmation and evidence downloads. Knowing a valid task or photo ID does not
+bypass the page-permission gate.
