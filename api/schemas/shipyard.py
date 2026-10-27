@@ -144,7 +144,7 @@ class VoidInboundManifestRequest(BaseModel):
 
 class PalletScanRequest(BaseModel):
     tag_suffix: str | None = Field(None, pattern=r"^[0-9]+-[0-9]+$")
-    qr_payload: str = Field(..., min_length=1, max_length=4096)
+    qr_payload: str | None = Field(None, min_length=1, max_length=4096)
     ship_no: str | None = Field(None, max_length=64)
     engineering_no: str | None = Field(None, max_length=64)
     production_drawing_no: str | None = Field(None, max_length=128)
@@ -168,8 +168,8 @@ class PalletScanRequest(BaseModel):
 
     @field_validator("qr_payload", mode="before")
     @classmethod
-    def strip_qr_payload(cls, value: str) -> str:
-        return _strip_required_text(value)
+    def strip_qr_payload(cls, value: str | None) -> str | None:
+        return _strip_text(value) or None
 
     @field_validator(
         "ship_no",
@@ -189,6 +189,7 @@ class PalletScanRequest(BaseModel):
 
 class ReceiptPalletRequest(PalletScanRequest):
     photo_id: UUID
+    label_recognition_id: UUID | None = None
 
 
 class ReceiveTicketRequest(BaseModel):
@@ -331,12 +332,12 @@ class ConfirmOutboundManifestRequest(BaseModel):
 
 class OutboundPalletScanRequest(BaseModel):
     tag_suffix: str = Field(..., pattern=r"^[1-9][0-9]*-[1-9][0-9]*$")
-    qr_payload: str = Field(..., min_length=1, max_length=4096)
+    qr_payload: str | None = Field(None, min_length=1, max_length=4096)
     ship_no: str | None = Field(None, max_length=64)
     engineering_no: str | None = Field(None, max_length=64)
     production_drawing_no: str | None = Field(None, max_length=128)
-    material_code: str = Field(..., min_length=1, max_length=128)
-    item_name: str = Field(..., min_length=1, max_length=255)
+    material_code: str | None = Field(None, min_length=1, max_length=128)
+    item_name: str | None = Field(None, min_length=1, max_length=255)
     batch_no: str | None = Field(None, max_length=128)
     label_quantity: Decimal | None = Field(
         None,
@@ -345,15 +346,18 @@ class OutboundPalletScanRequest(BaseModel):
         decimal_places=3,
     )
 
-    @field_validator("tag_suffix", "qr_payload", "material_code", "item_name")
+    @field_validator("tag_suffix")
     @classmethod
-    def strip_outbound_scan_required(cls, value: str) -> str:
+    def strip_outbound_scan_suffix(cls, value: str) -> str:
         return _strip_required_text(value)
 
     @field_validator(
+        "qr_payload",
         "ship_no",
         "engineering_no",
         "production_drawing_no",
+        "material_code",
+        "item_name",
         "batch_no",
     )
     @classmethod
@@ -363,6 +367,7 @@ class OutboundPalletScanRequest(BaseModel):
 
 class OutboundPalletEvidenceRequest(OutboundPalletScanRequest):
     photo_id: UUID
+    label_recognition_id: UUID | None = None
 
 
 class ConfirmOutboundTaskRequest(BaseModel):

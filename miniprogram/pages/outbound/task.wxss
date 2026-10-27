@@ -66,3 +66,62 @@
 .remove-button::after {
   border: 0;
 }
+
+.ocr-note {
+  margin-top: 14rpx;
+  color: #647684;
+  font-size: 22rpx;
+  line-height: 1.5;
+}
+
+.picker-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(18, 31, 40, 0.48);
+}
+
+.suffix-picker {
+  width: 100%;
+  padding: 34rpx 28rpx calc(28rpx + env(safe-area-inset-bottom));
+  border-radius: 28rpx 28rpx 0 0;
+  background: #fff;
+  box-sizing: border-box;
+}
+
+.picker-title {
+  color: #163b54;
+  font-size: 36rpx;
+  font-weight: 700;
+}
+
+.picker-copy {
+  margin-top: 12rpx;
+  color: #5c6e7a;
+  font-size: 24rpx;
+  line-height: 1.55;
+}
+
+.suffix-list {
+  max-height: 52vh;
+  margin-top: 22rpx;
+}
+
+.suffix-choice {
+  margin: 12rpx 0;
+  background: #eef5f9;
+  color: #174e70;
+  border-radius: 12rpx;
+  font-size: 30rpx;
+  font-weight: 700;
+}
+
+.suffix-choice::after {
+  border: 0;
+}
+
+.picker-cancel {
+  margin-top: 18rpx;
+}

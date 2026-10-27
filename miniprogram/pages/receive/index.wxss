@@ -71,3 +71,10 @@
 .mini-action::after {
   border: 0;
 }
+
+.ocr-note {
+  margin-top: 12rpx;
+  color: #647684;
+  font-size: 22rpx;
+  line-height: 1.5;
+}

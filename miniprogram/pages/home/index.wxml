@@ -31,7 +31,7 @@
     <view class="work-card receive-card" bindtap="openReceive">
       <view class="work-kicker">INBOUND</view>
       <view class="work-title">收货任务</view>
-      <view class="work-desc">到货清单、连续扫码、逐托照片与实收入库</view>
+      <view class="work-desc">到货清单、逐托拍照识别与实收入库</view>
       <view class="work-arrow">→</view>
     </view>
     <view class="work-card outbound-card" bindtap="openOutbound">

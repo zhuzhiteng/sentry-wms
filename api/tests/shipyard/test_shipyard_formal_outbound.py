@@ -422,8 +422,8 @@ def test_outbound_scan_requires_label_identity_and_points_to_the_right_task(
         },
         headers=auth_headers,
     )
-    assert missing_identity.status_code == 400
-    assert missing_identity.get_json()["error"] == "validation_error"
+    assert missing_identity.status_code == 422
+    assert missing_identity.get_json()["error"] == "outbound_validation_failed"
 
     wrong_task = client.post(
         f"/api/shipyard/outbound/tasks/{first_task['task_id']}/scan",

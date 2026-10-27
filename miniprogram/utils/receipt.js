@@ -31,7 +31,7 @@ function validateReceiptDraft({
   differenceReason,
 }) {
   if (!ticket) return { ok: false, error: '请先选择收货任务' };
-  if (!scans?.length) return { ok: false, error: '请先扫描并拍摄吊牌' };
+  if (!scans?.length) return { ok: false, error: '请先拍摄并识别吊牌' };
 
   const remaining = remainingQuantity(ticket);
   const receivedNow = toNumber(quantity);
@@ -55,7 +55,7 @@ function validateReceiptDraft({
   if (progress.expected && progress.registered > progress.expected) {
     return {
       ok: false,
-      error: `本次扫描托盘超过预计数量，预计 ${progress.expected} 托`,
+      error: `本次识别托盘超过预计数量，预计 ${progress.expected} 托`,
     };
   }
 

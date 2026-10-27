@@ -2,7 +2,7 @@
   <view class="hero">
     <view class="chip">INBOUND</view>
     <view class="hero-title">到货验收</view>
-    <view class="hero-meta">选择待收货票货，连续扫描并拍摄本票吊牌。</view>
+    <view class="hero-meta">选择待收货票货，逐托拍吊牌并自动识别打印字段。</view>
   </view>
 
   <view class="section-title">待收货清单</view>
@@ -76,28 +76,29 @@
       </view>
       <view class="grid-2 workbench-metrics">
         <view><view class="label">已收 / 剩余</view><view class="value">{{selectedTicket.received_quantity}} / {{remainingQuantityText}}</view></view>
-        <view><view class="label">本次已扫描托盘</view><view class="value">{{palletProgressText}}</view></view>
+        <view><view class="label">本次已识别托盘</view><view class="value">{{palletProgressText}}</view></view>
       </view>
 
       <view class="notice">
-        每托扫描一次并拍摄吊牌。本次可以少收，但少于剩余应收时必须填写差异原因；
+        每托只拍一张吊牌。系统识别船号、图号、物料和托盘后缀；少于剩余应收时必须填写差异原因，
         整票数量收满时，全部托盘必须齐套。
       </view>
+      <view class="ocr-note">原图用于留证，并上传云端识别吊牌打印字段。</view>
       <view wx:if="{{nextSuffix}}" class="next-suffix">{{nextSuffix}}</view>
       <button
         class="button-secondary"
         loading="{{busy}}"
         disabled="{{busy}}"
-        bindtap="scanAndPhotograph"
+        bindtap="captureLabel"
       >
-        扫码并拍摄吊牌
+        拍摄识别吊牌
       </button>
 
       <view wx:if="{{scans.length}}" class="scans">
         <view wx:for="{{scans}}" wx:key="suffix" class="scan-row">
           <view>
             <view class="value">托盘 {{item.suffix}}</view>
-            <view class="muted">照片 {{item.photo.file_name}}</view>
+            <view class="muted">{{item.recognized.item_name || '已识别吊牌'}} · 照片 {{item.photo.file_name}}</view>
           </view>
           <button class="mini-action" data-suffix="{{item.suffix}}" bindtap="removeScan">移除</button>
         </view>

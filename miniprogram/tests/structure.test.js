@@ -27,3 +27,12 @@ test('the mini-program contains separate receiving and outbound flows', () => {
   assert.ok(app.pages.includes('pages/outbound/index'));
   assert.ok(app.pages.includes('pages/outbound/task'));
 });
+
+test('normal receiving and formal-outbound pages never invoke QR scanning', () => {
+  for (const page of ['pages/receive/index.js', 'pages/outbound/task.js']) {
+    const source = fs.readFileSync(path.join(root, page), 'utf8');
+    assert.equal(source.includes('wx.scanCode'), false, page);
+    assert.equal(source.includes('qr_payload'), false, page);
+    assert.ok(source.includes('chooseMedia'), page);
+  }
+});

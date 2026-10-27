@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -31,12 +32,22 @@ from constants import (
 )
 from services.audit_service import write_audit_log
 from services.shipyard.errors import (
+    OcrProviderError,
+    OcrUnavailableError,
     OutboundOrderNotFoundError,
     OutboundStateError,
     OutboundTaskNotFoundError,
     OutboundValidationError,
     PhotoNotFoundError,
     PhotoValidationError,
+)
+from services.shipyard.label_ocr import recognize_label_image
+from services.shipyard.label_recognition_service import (
+    append_required_field_mismatches,
+    fields_scan_view,
+    load_label_recognition,
+    recognition_scan_view,
+    save_label_recognition,
 )
 from services.shipyard.outbound_manifest_service import (
     get_outbound_order_payload,
@@ -68,6 +79,33 @@ def _hash_qr(payload: str) -> str:
 
 def _normalized(value: str | None) -> str:
     return (value or "").strip().casefold()
+
+
+def _normalize_suffix(value: str | None) -> str | None:
+    text = (value or "").strip()
+    if re.fullmatch(r"[1-9]\d*-[1-9]\d*", text):
+        return text
+    return None
+
+
+def _scan_payload(scan) -> dict[str, Any]:
+    if hasattr(scan, "model_dump"):
+        return scan.model_dump(mode="json")
+    return {
+        "tag_suffix": scan.tag_suffix,
+        "label_recognition_id": getattr(scan, "label_recognition_id", None),
+        "ship_no": scan.ship_no,
+        "engineering_no": scan.engineering_no,
+        "production_drawing_no": scan.production_drawing_no,
+        "material_code": getattr(scan, "material_code", None),
+        "item_name": getattr(scan, "item_name", None),
+        "batch_no": scan.batch_no,
+        "label_quantity": (
+            _decimal_text(scan.label_quantity)
+            if scan.label_quantity is not None
+            else None
+        ),
+    }
 
 
 def _task_context(db, task_id: str, *, for_update: bool = False):
@@ -225,6 +263,13 @@ def validate_outbound_pallet_scan(
     task_id: str,
     scan,
 ) -> dict[str, Any]:
+    if not scan.qr_payload:
+        raise OutboundValidationError("请使用吊牌照片识别接口")
+    if not scan.material_code or not scan.item_name:
+        raise OutboundValidationError(
+            "旧版扫码接口必须提供物料编码和品名",
+            {"required_fields": ["material_code", "item_name"]},
+        )
     context = _task_context(db, task_id)
     if context is None:
         raise OutboundTaskNotFoundError("出库任务不存在")
@@ -317,7 +362,7 @@ def save_outbound_task_photo(
     db,
     *,
     task_id: str,
-    tag_suffix: str,
+    tag_suffix: str | None,
     file_name: str,
     content_type: str,
     content: bytes,
@@ -327,33 +372,35 @@ def save_outbound_task_photo(
     if context is None:
         raise OutboundTaskNotFoundError("出库任务不存在")
     _ensure_task_pending(context)
-    if tag_suffix not in set(context.expected_tag_suffixes):
-        raise OutboundValidationError(
-            "照片后缀不属于当前整票任务",
+    pallet = None
+    if tag_suffix:
+        if tag_suffix not in set(context.expected_tag_suffixes):
+            raise OutboundValidationError(
+                "照片后缀不属于当前整票任务",
+                {
+                    "tag_suffix": tag_suffix,
+                    "expected_tag_suffixes": list(context.expected_tag_suffixes),
+                },
+            )
+        pallet = db.execute(
+            text(
+                """
+                SELECT pallet_id, status
+                  FROM shipyard_pallet_units
+                 WHERE ticket_id = :ticket_id
+                   AND tag_suffix = :tag_suffix
+                """
+            ),
             {
+                "ticket_id": str(context.ticket_id),
                 "tag_suffix": tag_suffix,
-                "expected_tag_suffixes": list(context.expected_tag_suffixes),
             },
-        )
-    pallet = db.execute(
-        text(
-            """
-            SELECT pallet_id, status
-              FROM shipyard_pallet_units
-             WHERE ticket_id = :ticket_id
-               AND tag_suffix = :tag_suffix
-            """
-        ),
-        {
-            "ticket_id": str(context.ticket_id),
-            "tag_suffix": tag_suffix,
-        },
-    ).fetchone()
-    if pallet is None:
-        raise OutboundValidationError(
-            "当前票货不存在该托盘后缀",
-            {"tag_suffix": tag_suffix},
-        )
+        ).fetchone()
+        if pallet is None:
+            raise OutboundValidationError(
+                "当前票货不存在该托盘后缀",
+                {"tag_suffix": tag_suffix},
+            )
     if not content:
         raise PhotoValidationError("照片内容为空")
     if len(content) > MAX_UPLOAD_BYTES:
@@ -383,7 +430,7 @@ def save_outbound_task_photo(
         {
             "ticket_id": str(context.ticket_id),
             "warehouse_id": context.warehouse_id,
-            "pallet_id": str(pallet.pallet_id),
+            "pallet_id": str(pallet.pallet_id) if pallet else None,
             "tag_suffix": tag_suffix,
             "photo_kind": SHIPYARD_PHOTO_PALLET,
             "file_name": file_name[:255],
@@ -397,6 +444,186 @@ def save_outbound_task_photo(
     ).fetchone()
     db.commit()
     return {"photo": _photo_payload(row)}
+
+
+def _matching_outbound_tasks(db, fields: dict[str, Any], suffix: str | None):
+    material_code = fields.get("material_code")
+    item_name = fields.get("item_name")
+    if not material_code or not item_name:
+        return []
+    rows = db.execute(
+        text(
+            """
+            SELECT t.task_id, t.task_no, t.outbound_order_id,
+                   o.outbound_order_no
+              FROM shipyard_outbound_tasks t
+              JOIN shipyard_outbound_order_lines l
+                ON l.order_line_id = t.order_line_id
+              JOIN shipyard_outbound_orders o
+                ON o.outbound_order_id = t.outbound_order_id
+             WHERE t.status = :pending
+               AND upper(trim(l.material_code)) = upper(trim(:material_code))
+               AND trim(l.item_name) = trim(:item_name)
+               AND (
+                    :tag_suffix = ''
+                    OR :tag_suffix = ANY(t.expected_tag_suffixes)
+               )
+             ORDER BY t.created_at
+             LIMIT 5
+            """
+        ),
+        {
+            "pending": SHIPYARD_OUTBOUND_TASK_PENDING,
+            "material_code": material_code,
+            "item_name": item_name,
+            "tag_suffix": suffix or "",
+        },
+    ).fetchall()
+    return [
+        {
+            "task_id": str(row.task_id),
+            "task_no": row.task_no,
+            "outbound_order_id": str(row.outbound_order_id),
+            "outbound_order_no": row.outbound_order_no,
+        }
+        for row in rows
+    ]
+
+
+def recognize_outbound_label_photo(
+    db,
+    *,
+    task_id: str,
+    file_name: str,
+    content_type: str,
+    content: bytes,
+    uploaded_by: str,
+) -> dict[str, Any]:
+    context = _task_context(db, task_id)
+    if context is None:
+        raise OutboundTaskNotFoundError("出库任务不存在")
+    _ensure_task_pending(context)
+    photo_result = save_outbound_task_photo(
+        db,
+        task_id=task_id,
+        tag_suffix=None,
+        file_name=file_name,
+        content_type=content_type,
+        content=content,
+        uploaded_by=uploaded_by,
+    )
+    photo = photo_result["photo"]
+    try:
+        ocr = recognize_label_image(content)
+    except (OcrUnavailableError, OcrProviderError) as exc:
+        recognition = save_label_recognition(
+            db,
+            photo_id=photo["photo_id"],
+            ticket_id=str(context.ticket_id),
+            task_id=task_id,
+            warehouse_id=context.warehouse_id,
+            result=None,
+            status="FAILED",
+            actor=uploaded_by,
+            error_code=exc.code,
+            error_message=exc.message,
+        )
+        exc.details.update({"photo": photo, "recognition": recognition})
+        raise
+
+    fields = dict(ocr.fields)
+    suffix = _normalize_suffix(str(fields.get("tag_suffix") or ""))
+    scan = fields_scan_view(fields, suffix=suffix or "")
+    mismatches = _field_mismatches(context, scan)
+    append_required_field_mismatches(mismatches, scan)
+    if suffix and suffix not in set(context.expected_tag_suffixes):
+        mismatches.append(
+            {
+                "field": "tag_suffix",
+                "expected": list(context.expected_tag_suffixes),
+                "actual": suffix,
+                "reason": "MISMATCH",
+            }
+        )
+
+    pallet = None
+    if suffix:
+        pallet = db.execute(
+            text(
+                """
+                SELECT pallet_id, status
+                  FROM shipyard_pallet_units
+                 WHERE ticket_id = :ticket_id
+                   AND tag_suffix = :tag_suffix
+                """
+            ),
+            {
+                "ticket_id": str(context.ticket_id),
+                "tag_suffix": suffix,
+            },
+        ).fetchone()
+        if pallet is None:
+            mismatches.append(
+                {
+                    "field": "tag_suffix",
+                    "expected": list(context.expected_tag_suffixes),
+                    "actual": suffix,
+                    "reason": "NOT_FOUND",
+                }
+            )
+        else:
+            db.execute(
+                text(
+                    """
+                    UPDATE shipyard_photos
+                       SET tag_suffix = :tag_suffix, pallet_id = :pallet_id
+                     WHERE photo_id = :photo_id
+                    """
+                ),
+                {
+                    "tag_suffix": suffix,
+                    "pallet_id": str(pallet.pallet_id),
+                    "photo_id": photo["photo_id"],
+                },
+            )
+            photo["tag_suffix"] = suffix
+            photo["pallet_id"] = str(pallet.pallet_id)
+
+    candidates = _matching_outbound_tasks(db, fields, suffix)
+    candidates = [
+        item for item in candidates if item["task_id"] != str(context.task_id)
+    ]
+    status = "MATCHED" if suffix and not mismatches else "NEEDS_REVIEW"
+    recognition = save_label_recognition(
+        db,
+        photo_id=photo["photo_id"],
+        ticket_id=str(context.ticket_id),
+        task_id=task_id,
+        warehouse_id=context.warehouse_id,
+        result=ocr,
+        status=status,
+        actor=uploaded_by,
+    )
+    return {
+        "matched": status == "MATCHED",
+        "needs_suffix": suffix is None,
+        "remaining_tag_suffixes": list(context.expected_tag_suffixes),
+        "recognized": fields,
+        "mismatches": mismatches,
+        "candidate_tasks": candidates[:3],
+        "photo": photo,
+        "recognition": recognition,
+        "task": {
+            "task_id": str(context.task_id),
+            "task_no": context.task_no,
+            "planned_quantity": _decimal_text(context.planned_quantity),
+            "expected_tag_suffixes": list(context.expected_tag_suffixes),
+            "material_code": context.material_code,
+            "item_name": context.item_name,
+            "item_spec": context.item_spec,
+            "location_path_snapshot": context.location_path_snapshot,
+        },
+    }
 
 
 def get_outbound_photo(db, *, photo_id: str) -> dict[str, Any]:
@@ -461,8 +688,14 @@ def _evidence_photo(
         ),
         (row.outbound_confirmation_id is None, "照片已用于其他出库记录"),
         (row.photo_kind == SHIPYARD_PHOTO_PALLET, "照片类型必须为 PALLET"),
-        (row.tag_suffix == suffix, "照片后缀与扫描托盘不一致"),
-        (str(row.pallet_id) == str(pallet_id), "照片未关联到正确托盘"),
+        (
+            row.tag_suffix is None or row.tag_suffix == suffix,
+            "照片后缀与当前托盘不一致",
+        ),
+        (
+            row.pallet_id is None or str(row.pallet_id) == str(pallet_id),
+            "照片未关联到正确托盘",
+        ),
         (row.uploaded_by == actor, "只能使用当前出库人上传的照片"),
     )
     for passed, message in checks:
@@ -542,10 +775,15 @@ def _confirmation_summary(db, confirmation_id: str) -> dict[str, Any]:
             """
             SELECT rp.pallet_id, rp.tag_suffix, rp.qr_payload,
                    rp.qr_payload_sha256, rp.photo_id,
+                   rp.label_recognition_id,
+                   lr.status AS label_recognition_status,
+                   lr.fields AS label_recognition_fields,
                    ph.file_name, ph.content_type, ph.file_size,
                    ph.file_sha256
               FROM shipyard_outbound_confirmation_pallets rp
               JOIN shipyard_photos ph ON ph.photo_id = rp.photo_id
+              LEFT JOIN shipyard_label_recognitions lr
+                ON lr.recognition_id = rp.label_recognition_id
              WHERE rp.confirmation_id = :confirmation_id
              ORDER BY rp.tag_suffix
             """
@@ -586,6 +824,13 @@ def _confirmation_summary(db, confirmation_id: str) -> dict[str, Any]:
                 "tag_suffix": pallet.tag_suffix,
                 "qr_payload": pallet.qr_payload,
                 "qr_payload_sha256": pallet.qr_payload_sha256,
+                "label_recognition": {
+                    "recognition_id": str(pallet.label_recognition_id),
+                    "status": pallet.label_recognition_status,
+                    "fields": dict(pallet.label_recognition_fields or {}),
+                }
+                if pallet.label_recognition_id
+                else None,
                 "photo": {
                     "photo_id": str(pallet.photo_id),
                     "file_name": pallet.file_name,
@@ -670,7 +915,7 @@ def confirm_outbound_task(
         )
     if set(scan_suffixes) != set(expected_suffixes):
         raise OutboundValidationError(
-            "整票托盘未扫齐",
+            "整票托盘未拍齐",
             {
                 "expected_tag_suffixes": expected_suffixes,
                 "scanned_tag_suffixes": scan_suffixes,
@@ -687,13 +932,50 @@ def confirm_outbound_task(
     seen_photo_ids = set()
     seen_pallet_ids = set()
     for scan in validated.pallets:
-        qr_hash = _hash_qr(scan.qr_payload.strip())
         pallet = pallet_by_suffix[scan.tag_suffix]
-        if pallet.qr_payload_sha256 != qr_hash:
-            raise OutboundValidationError(
-                "扫描二维码与托盘实际吊牌不一致",
-                {"tag_suffix": scan.tag_suffix},
+        qr_hash = None
+        if scan.label_recognition_id:
+            recognition = load_label_recognition(
+                db,
+                str(scan.label_recognition_id),
+                ticket_id=str(context.ticket_id),
+                task_id=str(context.task_id),
+                photo_id=str(scan.photo_id),
+                for_update=True,
             )
+            if recognition.status == "FAILED":
+                raise OutboundValidationError(
+                    "吊牌 OCR 识别失败，请重新拍照",
+                    {"tag_suffix": scan.tag_suffix},
+                )
+            recognized_suffix = _normalize_suffix(
+                str(dict(recognition.fields or {}).get("tag_suffix") or "")
+            )
+            if recognized_suffix and recognized_suffix != scan.tag_suffix:
+                raise OutboundValidationError(
+                    "OCR 托盘后缀与本次提交不一致",
+                    {
+                        "expected": recognized_suffix,
+                        "actual": scan.tag_suffix,
+                    },
+                )
+            effective_scan = recognition_scan_view(
+                recognition,
+                suffix=scan.tag_suffix,
+            )
+        else:
+            if not scan.qr_payload:
+                raise OutboundValidationError(
+                    "吊牌照片缺少 OCR 识别结果，请重新拍照",
+                    {"tag_suffix": scan.tag_suffix},
+                )
+            qr_hash = _hash_qr(scan.qr_payload.strip())
+            if pallet.qr_payload_sha256 != qr_hash:
+                raise OutboundValidationError(
+                    "扫描二维码与托盘实际吊牌不一致",
+                    {"tag_suffix": scan.tag_suffix},
+                )
+            effective_scan = scan
         if pallet.status != SHIPYARD_PALLET_STORED:
             raise OutboundStateError(
                 "托盘不是可出库在库状态",
@@ -702,12 +984,16 @@ def confirm_outbound_task(
                     "status": pallet.status,
                 },
             )
-        if scan.batch_no and _normalized(scan.batch_no) != _normalized(pallet.batch_no):
+        if effective_scan.batch_no and _normalized(
+            effective_scan.batch_no
+        ) != _normalized(pallet.batch_no):
             raise OutboundValidationError(
-                "扫描批次号与吊牌库存不一致",
+                "吊牌批次号与库存不一致",
                 {"tag_suffix": scan.tag_suffix},
             )
-        mismatches = _field_mismatches(context, scan)
+        mismatches = _field_mismatches(context, effective_scan)
+        if scan.label_recognition_id:
+            append_required_field_mismatches(mismatches, effective_scan)
         if mismatches:
             raise OutboundValidationError(
                 "吊牌共同信息与出库任务不一致",
@@ -727,12 +1013,29 @@ def confirm_outbound_task(
             raise OutboundValidationError("同一托盘不能重复核销")
         seen_photo_ids.add(photo.photo_id)
         seen_pallet_ids.add(pallet.pallet_id)
+        if photo.tag_suffix is None or photo.pallet_id is None:
+            db.execute(
+                text(
+                    """
+                    UPDATE shipyard_photos
+                       SET tag_suffix = :tag_suffix,
+                           pallet_id = :pallet_id
+                     WHERE photo_id = :photo_id
+                    """
+                ),
+                {
+                    "tag_suffix": scan.tag_suffix,
+                    "pallet_id": str(pallet.pallet_id),
+                    "photo_id": str(photo.photo_id),
+                },
+            )
         evidence_rows.append(
             {
-                "scan": scan,
+                "scan": effective_scan,
                 "pallet": pallet,
                 "photo": photo,
                 "qr_hash": qr_hash,
+                "label_recognition_id": scan.label_recognition_id,
             }
         )
 
@@ -773,7 +1076,7 @@ def confirm_outbound_task(
             "bin_id": context.assigned_bin_id,
             "location_path_snapshot": context.location_path_snapshot,
             "scan_payloads": Json(
-                [item["scan"].model_dump(mode="json") for item in evidence_rows]
+                [_scan_payload(item["scan"]) for item in evidence_rows]
             ),
             "client_device_id": validated.client_device_id,
             "outbound_by": outbound_by,
@@ -786,10 +1089,12 @@ def confirm_outbound_task(
                 """
                 INSERT INTO shipyard_outbound_confirmation_pallets
                     (confirmation_id, pallet_id, tag_suffix,
-                     qr_payload, qr_payload_sha256, photo_id)
+                     qr_payload, qr_payload_sha256, photo_id,
+                     label_recognition_id)
                 VALUES
                     (:confirmation_id, :pallet_id, :tag_suffix,
-                     :qr_payload, :qr_payload_sha256, :photo_id)
+                     :qr_payload, :qr_payload_sha256, :photo_id,
+                     :label_recognition_id)
                 """
             ),
             {
@@ -797,8 +1102,11 @@ def confirm_outbound_task(
                 "pallet_id": str(item["pallet"].pallet_id),
                 "tag_suffix": item["pallet"].tag_suffix,
                 "qr_payload": item["pallet"].qr_payload,
-                "qr_payload_sha256": item["qr_hash"],
+                "qr_payload_sha256": (
+                    item["qr_hash"] or item["pallet"].qr_payload_sha256
+                ),
                 "photo_id": str(item["photo"].photo_id),
+                "label_recognition_id": item["label_recognition_id"],
             },
         )
         db.execute(

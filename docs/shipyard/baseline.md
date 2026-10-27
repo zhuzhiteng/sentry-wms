@@ -55,11 +55,11 @@ Windows.
 Commands use a dedicated `sentry_test` database.
 
 ```text
-Backend: 3031 passed, 55 skipped, 11 warnings in 332.82s
-Admin:   32 test files passed, 200 tests passed
-Miniprogram: 8 tests passed
+Backend: 3042 passed, 55 skipped, 11 warnings
+Admin:   32 test files passed, 203 tests passed
+Miniprogram: 17 tests passed
 Admin build: production build passed
-Schema:  086 applied twice to dev/test; fresh db/schema.sql created
+Schema:  087 applied twice to test; fresh db/schema.sql created
 ```
 
 The API test command must override the container's production environment:
@@ -100,9 +100,10 @@ binding enforcement, manifest void/reimport, and one cargo ticket per source
 row.
 
 The second slice is implemented as a separate ticket-level stock ledger:
-local QR/barcode input, server-side label validation, per-pallet photo evidence,
+photo-based label OCR, server-side field validation, per-pallet photo evidence,
 actual quantity receipt, shortage reporting, replenishment and idempotent
-confirmation.
+confirmation. QR input remains only as a legacy compatibility path and is not
+used by the current mini-program workflow.
 
 The third slice adds shipyard distribution-demand Excel recognition,
 warehouse-scoped dispatch matching, source-line lineage and printable front
@@ -117,7 +118,7 @@ exposes `/shipyard-settings` for ship/project bindings and zone-to-ship
 placement rules.
 
 The fourth shipyard slice adds formal outbound-manifest recognition, exact
-material-code/item/spec stock matching, whole-ticket multi-label scans,
+material-code/item/spec stock matching, whole-ticket multi-label photo OCR,
 per-pallet outbound photo evidence, one-time stock depletion, loading
 confirmation and a native WeChat mini-program for receiving and outbound work.
 Migration `086_shipyard_formal_outbound.sql` is idempotent and the consolidated

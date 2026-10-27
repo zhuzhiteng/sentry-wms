@@ -1,18 +1,12 @@
 const { createIdempotencyKey } = require('../../utils/idempotency');
-const {
-  buildReceiptConfirmation,
-  buildReceiptScanBody,
-} = require('../../utils/payload');
+const { buildReceiptConfirmation } = require('../../utils/payload');
 const {
   remainingQuantity,
   scanProgress,
   validateReceiptDraft,
 } = require('../../utils/receipt');
 const { request, upload } = require('../../utils/request');
-const {
-  normalizeSuffix,
-  parseQrPayload,
-} = require('../../utils/scan');
+const { normalizeSuffix } = require('../../utils/scan');
 const { requireSession } = require('../../utils/session');
 
 const STATUS_LABELS = {
@@ -162,33 +156,11 @@ Page({
     wx.pageScrollTo({ selector: '#ticket-workbench', duration: 250 });
   },
 
-  async scanAndPhotograph() {
+  async captureLabel() {
     const ticket = this.data.selectedTicket;
     if (!ticket || this.data.busy) return;
     this.setData({ busy: true });
     try {
-      const scanResult = await wx.scanCode({
-        onlyFromCamera: true,
-        scanType: ['qrCode', 'barCode'],
-      });
-      const raw = String(scanResult.result || '').trim();
-      const parsed = parseQrPayload(raw);
-      let suffix = normalizeSuffix(parsed.tag_suffix);
-      if (!suffix) {
-        suffix = await this.askSuffix();
-      }
-      if (!suffix) return;
-      if (this.data.scans.some((item) => item.suffix === suffix)) {
-        wx.showToast({ title: `托盘 ${suffix} 已拍摄`, icon: 'none' });
-        return;
-      }
-
-      const scanBody = buildReceiptScanBody(suffix, raw, parsed);
-      const validation = await request({
-        path: `/shipyard/inbound/tickets/${ticket.ticket_id}/scan`,
-        method: 'POST',
-        data: scanBody,
-      });
       const media = await wx.chooseMedia({
         count: 1,
         mediaType: ['image'],
@@ -196,28 +168,45 @@ Page({
         sizeType: ['compressed'],
       });
       const filePath = media.tempFiles[0].tempFilePath;
-      const photo = await upload({
-        path: `/shipyard/inbound/tickets/${ticket.ticket_id}/photos`,
+      const result = await upload({
+        path: `/shipyard/inbound/tickets/${ticket.ticket_id}/label-recognition`,
         filePath,
-        formData: {
-          photo_kind: 'PALLET',
-          tag_suffix: suffix,
-        },
+        timeout: 45000,
       });
+      const mismatches = result.mismatches || [];
+      const blocking = mismatches.filter((item) => item.field !== 'tag_suffix');
+      if (blocking.length) {
+        this.showLabelError(blocking);
+        return;
+      }
+      let suffix = normalizeSuffix(result.recognized?.tag_suffix);
+      if (result.needs_suffix || !suffix) {
+        suffix = await this.askSuffix();
+      } else {
+        const suffixMismatch = mismatches.find((item) => item.field === 'tag_suffix');
+        if (suffixMismatch) {
+          this.showLabelError([suffixMismatch]);
+          return;
+        }
+      }
+      if (!suffix) return;
+      if (this.data.scans.some((item) => item.suffix === suffix)) {
+        wx.showToast({ title: `托盘 ${suffix} 已拍摄，请检查是否拿错`, icon: 'none' });
+        return;
+      }
       const scans = [
         ...this.data.scans,
         {
           suffix,
-          raw,
-          parsed,
-          scan: scanBody,
-          photo: photo.photo,
-          validation,
+          recognition: result.recognition,
+          recognized: result.recognized || {},
+          photo: result.photo,
+          validation: result,
         },
       ];
       const progress = scanProgress(ticket, scans);
       const nextSuffix = progress.remaining === null
-        ? '可继续扫描下一托'
+        ? '可继续拍摄下一托'
         : progress.remaining > 0
           ? `还差 ${progress.remaining} 托`
         : '';
@@ -226,20 +215,52 @@ Page({
         nextSuffix,
         palletProgressText: progress.text,
       });
-      wx.showToast({ title: `托盘 ${suffix} 已核验`, icon: 'success' });
+      wx.showToast({ title: `托盘 ${suffix} 已识别`, icon: 'success' });
     } catch (error) {
       if (error.errMsg && error.errMsg.includes('cancel')) return;
-      wx.showToast({ title: error.message || '扫码或拍照取消', icon: 'none' });
+      this.showLabelError(
+        error.response?.data?.mismatches || [],
+        error.message || '吊牌识别失败，请重拍',
+      );
     } finally {
       this.setData({ busy: false });
     }
   },
 
+  showLabelError(mismatches, fallback = '吊牌字段与当前票货不一致') {
+    const labels = {
+      ship_no: '船号',
+      engineering_no: '工程号',
+      production_drawing_no: '制作图号',
+      material_code: '物料编码',
+      item_name: '品名',
+      label_quantity: '件数',
+      tag_suffix: '托盘后缀',
+    };
+    const content = mismatches.length
+      ? mismatches.slice(0, 4).map((item) => {
+        const label = labels[item.field] || item.field;
+        if (item.reason === 'REQUIRED') return `${label}未识别，请重拍`;
+        if (item.reason === 'DUPLICATE') return `${label} ${item.actual || ''} 已使用`;
+        if (item.reason === 'TOO_MANY') {
+          return `本票托盘数量已满，预计 ${item.expected} 托`;
+        }
+        return `${label}不一致，应为 ${item.expected || '—'}，识别为 ${item.actual || '—'}`;
+      }).join('\n')
+      : fallback;
+    wx.showModal({
+      title: '吊牌未通过',
+      content: `${content}\n\n照片已留证，本次未计入收货。`,
+      showCancel: false,
+      confirmText: '重拍',
+    });
+  },
+
   askSuffix() {
     return new Promise((resolve) => {
       wx.showModal({
-        title: '填写托盘后缀',
-        content: '',
+        title: '补录托盘后缀',
+        content: 'OCR 未读到后缀，请按吊牌核对后输入。',
         editable: true,
         placeholderText: '例如 1-1',
         success(result) {
@@ -276,7 +297,7 @@ Page({
       scans,
       palletProgressText: progress.text,
       nextSuffix: progress.remaining === null
-        ? '可继续扫描下一托'
+        ? '可继续拍摄下一托'
         : progress.remaining > 0
           ? `还差 ${progress.remaining} 托`
           : '',

@@ -155,3 +155,17 @@ class OutboundStateError(ShipyardStateError):
 class OutboundValidationError(ShipyardValidationError):
     code = "outbound_validation_failed"
     status_code = 422
+
+
+class OcrUnavailableError(ShipyardServiceError):
+    code = "ocr_unavailable"
+    status_code = 503
+
+
+class OcrProviderError(ShipyardServiceError):
+    code = "ocr_provider_error"
+    status_code = 502
+
+
+class LabelRecognitionNotFoundError(ShipyardNotFoundError):
+    code = "label_recognition_not_found"

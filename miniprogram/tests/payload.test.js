@@ -3,59 +3,21 @@ const assert = require('node:assert/strict');
 
 const {
   buildOutboundConfirmation,
-  buildOutboundScanBody,
   buildReceiptConfirmation,
-  buildReceiptScanBody,
 } = require('../utils/payload');
-
-test('outbound scan only sends identity read from the label', () => {
-  const body = buildOutboundScanBody(
-    '1-1',
-    'QR-1',
-    {
-      material_code: 'MAT-LABEL',
-      item_name: '吊牌品名',
-      batch_no: 'B-01',
-      label_quantity: '2',
-    },
-  );
-
-  assert.equal(body.tag_suffix, '1-1');
-  assert.equal(body.material_code, 'MAT-LABEL');
-  assert.equal(body.item_name, '吊牌品名');
-  assert.equal(body.label_quantity, 2);
-  assert.equal(body.ship_no, undefined);
-});
-
-test('receipt scan carries printed label fields without task fallbacks', () => {
-  const body = buildReceiptScanBody(
-    '2-1',
-    'QR-2',
-    {
-      engineering_no: 'H1613',
-      manufacturer_name: '船厂配件厂',
-      installation_pallet_no: 'P-2',
-      destination: 'A 区 / A1',
-    },
-  );
-
-  assert.equal(body.tag_suffix, '2-1');
-  assert.equal(body.engineering_no, 'H1613');
-  assert.equal(body.manufacturer_name, '船厂配件厂');
-  assert.equal(body.installation_pallet_no, 'P-2');
-  assert.equal(body.label_quantity, undefined);
-});
 
 test('outbound confirmation requires every local evidence item', () => {
   const body = buildOutboundConfirmation(
     'outbound-1',
     [
       {
-        scan: { tag_suffix: '1-1', qr_payload: 'QR-1' },
+        suffix: '1-1',
+        recognition: { recognition_id: 'recognition-1' },
         photo: { photo_id: 'photo-1' },
       },
       {
-        scan: { tag_suffix: '1-2', qr_payload: 'QR-2' },
+        suffix: '1-2',
+        recognition: { recognition_id: 'recognition-2' },
         photo: { photo_id: 'photo-2' },
       },
     ],
@@ -67,6 +29,11 @@ test('outbound confirmation requires every local evidence item', () => {
     body.pallets.map((item) => item.photo_id),
     ['photo-1', 'photo-2'],
   );
+  assert.deepEqual(
+    body.pallets.map((item) => item.label_recognition_id),
+    ['recognition-1', 'recognition-2'],
+  );
+  assert.equal(body.pallets[0].qr_payload, undefined);
 });
 
 test('receipt confirmation carries shortage reason without changing quantity', () => {
@@ -75,7 +42,8 @@ test('receipt confirmation carries shortage reason without changing quantity', (
     quantity: 3,
     evidence: [
       {
-        scan: { tag_suffix: '1-1', qr_payload: 'QR-1' },
+        suffix: '1-1',
+        recognition: { recognition_id: 'recognition-1' },
         photo: { photo_id: 'photo-1' },
       },
     ],

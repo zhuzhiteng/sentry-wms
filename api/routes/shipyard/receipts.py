@@ -22,6 +22,7 @@ from services.shipyard.receipt_service import (
     confirm_ticket_receipt,
     get_photo,
     get_ticket_context,
+    recognize_ticket_label_photo,
     report_ticket_shortage,
     save_ticket_photo,
     validate_ticket_scan,
@@ -62,6 +63,43 @@ def scan_inbound_pallet(ticket_id, validated):
         scan=validated,
     )
     return jsonify(payload)
+
+
+@shipyard_bp.post("/inbound/tickets/<uuid:ticket_id>/label-recognition")
+@require_auth
+@require_shipyard_roles(*RECEIPT_WRITE_ROLES)
+@require_admin_or_page_permission("inbound")
+@with_db
+def recognize_inbound_ticket_label(ticket_id):
+    if not request.mimetype.startswith("multipart/form-data"):
+        return jsonify(
+            {
+                "error": "unsupported_media_type",
+                "message": "请使用 multipart/form-data 上传吊牌照片",
+            }
+        ), 415
+    _context, ok, denied = _check_ticket_access(ticket_id)
+    if not ok:
+        return denied
+    uploaded = request.files.get("file")
+    if uploaded is None or not uploaded.filename:
+        return jsonify({"error": "file_required"}), 400
+    try:
+        content = read_upload_bytes(uploaded)
+        content_type = detect_image_content_type(content)
+    except UploadTooLargeError as exc:
+        return jsonify({"error": "file_too_large", "message": str(exc)}), 413
+    except UnsupportedImageError as exc:
+        return jsonify({"error": "unsupported_file_type", "message": str(exc)}), 415
+    payload = recognize_ticket_label_photo(
+        g.db,
+        ticket_id=str(ticket_id),
+        file_name=safe_upload_name(uploaded.filename, fallback="pallet-label"),
+        content_type=content_type,
+        content=content,
+        uploaded_by=g.current_user["username"],
+    )
+    return jsonify(payload), 201
 
 
 @shipyard_bp.post("/inbound/tickets/<uuid:ticket_id>/photos")

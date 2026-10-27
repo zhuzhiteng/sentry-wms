@@ -7,6 +7,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from psycopg2.extras import Json
 from sqlalchemy import text
 
 from constants import (
@@ -36,6 +37,8 @@ from constants import (
 )
 from services.audit_service import write_audit_log
 from services.shipyard.errors import (
+    OcrProviderError,
+    OcrUnavailableError,
     PalletDuplicateError,
     PalletValidationError,
     PhotoNotFoundError,
@@ -44,6 +47,14 @@ from services.shipyard.errors import (
     ShortageStateError,
     TicketNotFoundError,
     TicketStateError,
+)
+from services.shipyard.label_ocr import recognize_label_image
+from services.shipyard.label_recognition_service import (
+    append_required_field_mismatches,
+    fields_scan_view,
+    load_label_recognition,
+    recognition_scan_view,
+    save_label_recognition,
 )
 from services.shipyard.manifest_service import get_manifest_payload
 from utils.uploads import MAX_UPLOAD_BYTES
@@ -189,8 +200,12 @@ def _normalized(value: str | None) -> str:
     return (value or "").strip().casefold()
 
 
-def _validate_scan_fields(context, scan) -> str | None:
-    suffix = _normalize_suffix(scan.tag_suffix)
+def _scan_field_mismatches(
+    context,
+    scan,
+    *,
+    require_expected_present: bool = False,
+) -> list[dict[str, Any]]:
     expected_fields = (
         ("ship_no", context.ship_no, scan.ship_no),
         (
@@ -208,10 +223,24 @@ def _validate_scan_fields(context, scan) -> str | None:
             context.expected_manufacturer_name,
             scan.manufacturer_name,
         ),
+        (
+            "material_code",
+            context.material_code,
+            getattr(scan, "material_code", None),
+        ),
+        (
+            "item_name",
+            context.item_name,
+            getattr(scan, "item_name", None),
+        ),
     )
     mismatches = []
     for field, expected, actual in expected_fields:
-        if expected and not actual:
+        if field in {"material_code", "item_name"} and not hasattr(scan, field):
+            continue
+        if not actual:
+            if not expected or not require_expected_present:
+                continue
             mismatches.append(
                 {
                     "field": field,
@@ -240,6 +269,21 @@ def _validate_scan_fields(context, scan) -> str | None:
                 "reason": "MISMATCH",
             }
         )
+    return mismatches
+
+
+def _validate_scan_fields(
+    context,
+    scan,
+    *,
+    require_expected_present: bool = False,
+) -> str | None:
+    suffix = _normalize_suffix(scan.tag_suffix)
+    mismatches = _scan_field_mismatches(
+        context,
+        scan,
+        require_expected_present=require_expected_present,
+    )
     if mismatches:
         raise PalletValidationError(
             "吊牌字段与票货或清单不一致",
@@ -266,18 +310,25 @@ def _existing_pallet_for_qr(db, qr_hash: str):
     ).fetchone()
 
 
-def _ensure_new_pallet(db, context, scan, suffix: str | None, qr_hash: str) -> None:
-    existing_qr = _existing_pallet_for_qr(db, qr_hash)
-    if existing_qr is not None:
-        raise PalletDuplicateError(
-            "该吊牌二维码已经登记，不能重复入库",
-            {
-                "pallet_id": str(existing_qr.pallet_id),
-                "ticket_id": str(existing_qr.ticket_id),
-                "tag_suffix": existing_qr.tag_suffix,
-                "status": existing_qr.status,
-            },
-        )
+def _ensure_new_pallet(
+    db,
+    context,
+    scan,
+    suffix: str | None,
+    qr_hash: str | None,
+) -> None:
+    if qr_hash:
+        existing_qr = _existing_pallet_for_qr(db, qr_hash)
+        if existing_qr is not None:
+            raise PalletDuplicateError(
+                "该吊牌二维码已经登记，不能重复入库",
+                {
+                    "pallet_id": str(existing_qr.pallet_id),
+                    "ticket_id": str(existing_qr.ticket_id),
+                    "tag_suffix": existing_qr.tag_suffix,
+                    "status": existing_qr.status,
+                },
+            )
     existing_suffix = db.execute(
         text(
             """
@@ -408,9 +459,9 @@ def _pallet_photo(db, photo_id, *, context, suffix: str | None, actor: str):
             "托盘照片类型必须为 PALLET",
             {"photo_id": str(photo_id), "photo_kind": row.photo_kind},
         )
-    if row.tag_suffix != suffix:
+    if row.tag_suffix is not None and row.tag_suffix != suffix:
         raise PhotoValidationError(
-            "照片的托盘后缀与扫描结果不一致",
+            "照片的托盘后缀与识别结果不一致",
             {
                 "photo_id": str(photo_id),
                 "photo_tag_suffix": row.tag_suffix,
@@ -514,11 +565,17 @@ def _ticket_payload(context) -> dict[str, Any]:
 
 
 def validate_ticket_scan(db, *, ticket_id: str, scan) -> dict[str, Any]:
+    if not scan.qr_payload:
+        raise PalletValidationError("请使用吊牌照片识别接口")
     context = _ticket_context(db, ticket_id)
     if context is None:
         raise TicketNotFoundError("票货不存在")
     _ensure_receivable(context)
-    suffix = _validate_scan_fields(context, scan)
+    suffix = _validate_scan_fields(
+        context,
+        scan,
+        require_expected_present=True,
+    )
     if (
         context.expected_pallet_count is not None
         and context.pallet_count >= context.expected_pallet_count
@@ -599,24 +656,6 @@ def save_ticket_photo(
             {"content_type": content_type},
         )
     suffix = _normalize_suffix(tag_suffix)
-    if photo_kind == SHIPYARD_PHOTO_PALLET and not suffix:
-        has_suffixes = db.execute(
-            text(
-                """
-                SELECT EXISTS (
-                    SELECT 1 FROM shipyard_pallet_units
-                     WHERE ticket_id = :ticket_id
-                       AND tag_suffix IS NOT NULL
-                )
-                """
-            ),
-            {"ticket_id": ticket_id},
-        ).scalar()
-        if has_suffixes:
-            raise PhotoValidationError(
-                "多托盘票货的吊牌照片必须提供托盘后缀",
-                {"ticket_id": ticket_id},
-            )
     row = db.execute(
         text(
             """
@@ -651,6 +690,124 @@ def save_ticket_photo(
     return {
         "warehouse_id": row.warehouse_id,
         "photo": _photo_payload(row),
+    }
+
+
+def recognize_ticket_label_photo(
+    db,
+    *,
+    ticket_id: str,
+    file_name: str,
+    content_type: str,
+    content: bytes,
+    uploaded_by: str,
+) -> dict[str, Any]:
+    context = _ticket_context(db, ticket_id)
+    if context is None:
+        raise TicketNotFoundError("票货不存在")
+    _ensure_receivable(context)
+    photo_result = save_ticket_photo(
+        db,
+        ticket_id=ticket_id,
+        photo_kind=SHIPYARD_PHOTO_PALLET,
+        tag_suffix=None,
+        file_name=file_name,
+        content_type=content_type,
+        content=content,
+        uploaded_by=uploaded_by,
+    )
+    photo = photo_result["photo"]
+    try:
+        ocr = recognize_label_image(content)
+    except (OcrUnavailableError, OcrProviderError) as exc:
+        recognition = save_label_recognition(
+            db,
+            photo_id=photo["photo_id"],
+            ticket_id=ticket_id,
+            task_id=None,
+            warehouse_id=photo_result["warehouse_id"],
+            result=None,
+            status="FAILED",
+            actor=uploaded_by,
+            error_code=exc.code,
+            error_message=exc.message,
+        )
+        exc.details.update({"photo": photo, "recognition": recognition})
+        raise
+
+    fields = dict(ocr.fields)
+    suffix = _normalize_suffix(str(fields.get("tag_suffix") or ""))
+    scan = fields_scan_view(fields, suffix=suffix or "")
+    mismatches = _scan_field_mismatches(context, scan)
+    append_required_field_mismatches(mismatches, scan)
+    if suffix is None:
+        if not any(item["field"] == "tag_suffix" for item in mismatches):
+            mismatches.append(
+                {
+                    "field": "tag_suffix",
+                    "expected": "1-1 格式托盘后缀",
+                    "actual": None,
+                    "reason": "REQUIRED",
+                }
+            )
+    elif (
+        context.expected_pallet_count is not None
+        and context.pallet_count >= context.expected_pallet_count
+    ):
+        mismatches.append(
+            {
+                "field": "pallet_count",
+                "expected": context.expected_pallet_count,
+                "actual": context.pallet_count,
+                "reason": "TOO_MANY",
+            }
+        )
+    else:
+        try:
+            _ensure_new_pallet(db, context, scan, suffix, None)
+        except PalletDuplicateError as exc:
+            mismatches.append(
+                {
+                    "field": "tag_suffix",
+                    "expected": suffix,
+                    "actual": suffix,
+                    "reason": "DUPLICATE",
+                    "message": exc.message,
+                }
+            )
+
+    if suffix:
+        db.execute(
+            text(
+                """
+                UPDATE shipyard_photos
+                   SET tag_suffix = :tag_suffix
+                 WHERE photo_id = :photo_id
+                """
+            ),
+            {"tag_suffix": suffix, "photo_id": photo["photo_id"]},
+        )
+        photo["tag_suffix"] = suffix
+
+    status = "MATCHED" if suffix and not mismatches else "NEEDS_REVIEW"
+    recognition = save_label_recognition(
+        db,
+        photo_id=photo["photo_id"],
+        ticket_id=ticket_id,
+        task_id=None,
+        warehouse_id=photo_result["warehouse_id"],
+        result=ocr,
+        status=status,
+        actor=uploaded_by,
+    )
+    return {
+        "matched": status == "MATCHED",
+        "needs_suffix": suffix is None,
+        "recognized": fields,
+        "mismatches": mismatches,
+        "photo": photo,
+        "recognition": recognition,
+        "ticket": _ticket_payload(context),
     }
 
 
@@ -751,12 +908,14 @@ def _insert_pallet_units(db, ticket_id: str, scans, received_by: str):
                 INSERT INTO shipyard_pallet_units
                     (ticket_id, tag_suffix, qr_payload,
                      qr_payload_sha256, factory_pallet_no,
-                     installation_pallet_no, batch_no, status,
+                     installation_pallet_no, batch_no, label_fields,
+                     status,
                      received_by, received_at)
                 VALUES
                     (:ticket_id, :tag_suffix, :qr_payload,
                      :qr_payload_sha256, :factory_pallet_no,
-                     :installation_pallet_no, :batch_no, :status,
+                     :installation_pallet_no, :batch_no, :label_fields,
+                     :status,
                      :received_by, NOW())
                 RETURNING pallet_id
                 """
@@ -764,11 +923,14 @@ def _insert_pallet_units(db, ticket_id: str, scans, received_by: str):
             {
                 "ticket_id": ticket_id,
                 "tag_suffix": scan.tag_suffix,
-                "qr_payload": scan.qr_payload.strip(),
-                "qr_payload_sha256": _hash_qr(scan.qr_payload.strip()),
+                "qr_payload": (scan.qr_payload.strip() if scan.qr_payload else None),
+                "qr_payload_sha256": (
+                    _hash_qr(scan.qr_payload.strip()) if scan.qr_payload else None
+                ),
                 "factory_pallet_no": scan.qr_pallet_no,
                 "installation_pallet_no": scan.installation_pallet_no,
                 "batch_no": scan.batch_no,
+                "label_fields": Json(getattr(scan, "label_fields", {}) or {}),
                 "status": SHIPYARD_PALLET_STORED,
                 "received_by": received_by,
             },
@@ -873,17 +1035,22 @@ def _receipt_summary(db, receipt_id: str) -> dict[str, Any]:
         text(
             """
             SELECT p.pallet_id, p.tag_suffix, p.qr_payload,
-                   p.qr_payload_sha256, p.factory_pallet_no,
+                   p.qr_payload_sha256, p.label_fields, p.factory_pallet_no,
                    p.installation_pallet_no, p.batch_no, p.status,
                    p.received_by, p.received_at,
                    ph.photo_id, ph.file_name, ph.content_type,
-                   ph.file_size, ph.file_sha256
+                   ph.file_size, ph.file_sha256,
+                   lr.recognition_id AS label_recognition_id,
+                   lr.status AS label_recognition_status,
+                   lr.fields AS label_recognition_fields
               FROM shipyard_receipt_pallets rp
               JOIN shipyard_pallet_units p ON p.pallet_id = rp.pallet_id
               LEFT JOIN shipyard_photos ph
                 ON ph.receipt_id = rp.receipt_id
                AND ph.pallet_id = rp.pallet_id
                AND ph.photo_kind = :pallet_kind
+              LEFT JOIN shipyard_label_recognitions lr
+                ON lr.photo_id = ph.photo_id
              WHERE rp.receipt_id = :receipt_id
              ORDER BY p.tag_suffix NULLS FIRST, p.pallet_id
             """
@@ -958,6 +1125,7 @@ def _receipt_summary(db, receipt_id: str) -> dict[str, Any]:
                 "tag_suffix": pallet.tag_suffix,
                 "qr_payload": pallet.qr_payload,
                 "qr_payload_sha256": pallet.qr_payload_sha256,
+                "label_fields": dict(pallet.label_fields or {}),
                 "factory_pallet_no": pallet.factory_pallet_no,
                 "installation_pallet_no": pallet.installation_pallet_no,
                 "batch_no": pallet.batch_no,
@@ -972,6 +1140,13 @@ def _receipt_summary(db, receipt_id: str) -> dict[str, Any]:
                     "file_sha256": pallet.file_sha256,
                 }
                 if pallet.photo_id
+                else None,
+                "label_recognition": {
+                    "recognition_id": str(pallet.label_recognition_id),
+                    "status": pallet.label_recognition_status,
+                    "fields": dict(pallet.label_recognition_fields or {}),
+                }
+                if pallet.label_recognition_id
                 else None,
             }
             for pallet in pallets
@@ -1045,17 +1220,63 @@ def confirm_ticket_receipt(
     photos = []
     photo_ids = set()
     qr_hashes = set()
+    effective_scans = []
     for scan, suffix in zip(validated.pallets, suffixes, strict=True):
-        _validate_scan_fields(context, scan)
-        scan.tag_suffix = suffix
-        qr_hash = _hash_qr(scan.qr_payload.strip())
-        if qr_hash in qr_hashes:
-            raise PalletDuplicateError(
-                "同一次提交中存在重复的吊牌二维码",
-                {"tag_suffix": suffix},
+        qr_hash = None
+        if scan.label_recognition_id:
+            recognition = load_label_recognition(
+                db,
+                str(scan.label_recognition_id),
+                ticket_id=ticket_id,
+                photo_id=str(scan.photo_id),
+                for_update=True,
             )
-        qr_hashes.add(qr_hash)
-        _ensure_new_pallet(db, context, scan, suffix, qr_hash)
+            if recognition.status == "FAILED":
+                raise PalletValidationError(
+                    "吊牌 OCR 识别失败，请重新拍照",
+                    {"recognition_id": str(recognition.recognition_id)},
+                )
+            recognized_suffix = _normalize_suffix(
+                str(dict(recognition.fields or {}).get("tag_suffix") or "")
+            )
+            if recognized_suffix and recognized_suffix != suffix:
+                raise PalletValidationError(
+                    "OCR 托盘后缀与本次提交不一致",
+                    {
+                        "expected": recognized_suffix,
+                        "actual": suffix,
+                    },
+                )
+            effective_scan = recognition_scan_view(recognition, suffix=suffix)
+        else:
+            if not scan.qr_payload:
+                raise PalletValidationError("吊牌照片缺少 OCR 识别结果，请重新拍照")
+            effective_scan = scan
+            effective_scan.tag_suffix = suffix
+            qr_hash = _hash_qr(scan.qr_payload.strip())
+            if qr_hash in qr_hashes:
+                raise PalletDuplicateError(
+                    "同一次提交中存在重复的吊牌二维码",
+                    {"tag_suffix": suffix},
+                )
+            qr_hashes.add(qr_hash)
+        _validate_scan_fields(
+            context,
+            effective_scan,
+            require_expected_present=not scan.label_recognition_id,
+        )
+        if scan.label_recognition_id:
+            required_mismatches: list[dict[str, Any]] = []
+            append_required_field_mismatches(
+                required_mismatches,
+                effective_scan,
+            )
+            if required_mismatches:
+                raise PalletValidationError(
+                    "吊牌必填字段未识别",
+                    {"mismatches": required_mismatches},
+                )
+        _ensure_new_pallet(db, context, effective_scan, suffix, qr_hash)
         photo = _pallet_photo(
             db,
             scan.photo_id,
@@ -1069,7 +1290,19 @@ def confirm_ticket_receipt(
                 {"photo_id": str(photo.photo_id)},
             )
         photo_ids.add(photo.photo_id)
+        if photo.tag_suffix is None:
+            db.execute(
+                text(
+                    """
+                    UPDATE shipyard_photos
+                       SET tag_suffix = :tag_suffix
+                     WHERE photo_id = :photo_id
+                    """
+                ),
+                {"tag_suffix": suffix, "photo_id": str(photo.photo_id)},
+            )
         photos.append(photo)
+        effective_scans.append(effective_scan)
 
     optional_photos = [
         _optional_photo(
@@ -1144,7 +1377,7 @@ def confirm_ticket_receipt(
     pallet_ids = _insert_pallet_units(
         db,
         ticket_id,
-        validated.pallets,
+        effective_scans,
         received_by,
     )
 
@@ -1185,7 +1418,7 @@ def confirm_ticket_receipt(
     _attach_receipt_evidence(
         db,
         receipt_id=receipt_id,
-        scans=validated.pallets,
+        scans=effective_scans,
         pallet_ids=pallet_ids,
         photos=photos,
         optional_photos=optional_photos,

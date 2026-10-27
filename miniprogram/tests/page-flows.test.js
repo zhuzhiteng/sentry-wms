@@ -34,9 +34,8 @@ function instantiate(definition) {
   return page;
 }
 
-test('receiving scans and validates before uploading the evidence photo', async () => {
-  const sequence = [];
-  const requests = [];
+test('receiving captures once and uses OCR without scanning a QR code', async () => {
+  const uploads = [];
   const session = {
     user: { username: 'receiver' },
     warehouseId: 1,
@@ -45,27 +44,28 @@ test('receiving scans and validates before uploading the evidence photo', async 
     requireSession: () => session,
   });
   installMock('utils/request.js', {
-    request: async (options) => {
-      requests.push(options);
-      return { matched: true };
+    request: async () => {
+      throw new Error('normal receiving must not call the legacy scan API');
     },
-    upload: async () => {
-      sequence.push('upload');
-      return { photo: { photo_id: 'photo-1', file_name: 'label.jpg' } };
+    upload: async (options) => {
+      uploads.push(options);
+      return {
+        matched: true,
+        needs_suffix: false,
+        recognized: {
+          ship_no: 'HUX-01',
+          material_code: 'MAT-01',
+          item_name: '船用支架',
+          tag_suffix: '1-1',
+        },
+        mismatches: [],
+        recognition: { recognition_id: 'recognition-1' },
+        photo: { photo_id: 'photo-1', file_name: 'label.jpg' },
+      };
     },
   });
 
   global.wx = {
-    scanCode: async () => ({
-      result: JSON.stringify({
-        船号: 'HUX-01',
-        工程号: 'HUX-01',
-        制作图号: 'D-01',
-        厂家: '测试配件厂',
-        托盘后缀: '1-1',
-        件数: '4',
-      }),
-    }),
     chooseMedia: async () => ({
       tempFiles: [{ tempFilePath: '/tmp/label.jpg' }],
     }),
@@ -82,20 +82,18 @@ test('receiving scans and validates before uploading the evidence photo', async 
     expected_pallet_count: 2,
     pallet_count: 0,
   };
-  const originalRequest = requests.push.bind(requests);
-  requests.push = (item) => {
-    if (item.path.endsWith('/scan')) sequence.push('scan');
-    return originalRequest(item);
-  };
 
-  await page.scanAndPhotograph();
+  await page.captureLabel();
 
-  assert.deepEqual(sequence, ['scan', 'upload']);
+  assert.equal(uploads.length, 1);
+  assert.equal(
+    uploads[0].path,
+    '/shipyard/inbound/tickets/ticket-1/label-recognition',
+  );
   assert.equal(page.data.scans.length, 1);
+  assert.equal(page.data.scans[0].recognition.recognition_id, 'recognition-1');
   assert.equal(page.data.palletProgressText, '1 / 2 托');
   assert.equal(page.data.nextSuffix, '还差 1 托');
-  assert.equal(requests[0].data.ship_no, 'HUX-01');
-  assert.equal(requests[0].data.material_code, undefined);
 });
 
 test('receiving submits a short quantity with fewer pallets and its reason', async () => {
@@ -138,7 +136,7 @@ test('receiving submits a short quantity with fewer pallets and its reason', asy
   };
   page.data.scans = [{
     suffix: '1-1',
-    scan: { tag_suffix: '1-1', qr_payload: 'QR-1' },
+    recognition: { recognition_id: 'recognition-1' },
     photo: { photo_id: 'photo-1' },
   }];
   page.data.quantity = '2';
@@ -150,7 +148,67 @@ test('receiving submits a short quantity with fewer pallets and its reason', asy
   assert.equal(requests[0].path, '/shipyard/inbound/tickets/ticket-1/receipts');
   assert.equal(requests[0].data.received_quantity, 2);
   assert.equal(requests[0].data.pallets.length, 1);
+  assert.equal(requests[0].data.pallets[0].label_recognition_id, 'recognition-1');
+  assert.equal(requests[0].data.pallets[0].qr_payload, undefined);
   assert.equal(requests[0].data.difference_reason, '少 2 件，余货明天补到');
+});
+
+test('outbound asks only for the remaining suffix when OCR misses it', async () => {
+  const session = {
+    user: { username: 'outbound' },
+    warehouseId: 1,
+  };
+  installMock('utils/session.js', {
+    requireSession: () => session,
+  });
+  installMock('utils/request.js', {
+    request: async () => ({}),
+    upload: async () => ({
+      matched: false,
+      needs_suffix: true,
+      recognized: {
+        material_code: 'MAT-01',
+        item_name: '船用支架',
+      },
+      mismatches: [{ field: 'tag_suffix', reason: 'REQUIRED' }],
+      recognition: { recognition_id: 'recognition-2' },
+      photo: { photo_id: 'photo-2', file_name: 'label.jpg' },
+    }),
+  });
+  global.wx = {
+    chooseMedia: async () => ({
+      tempFiles: [{ tempFilePath: '/tmp/label.jpg' }],
+    }),
+    showToast: () => {},
+    showModal: () => {},
+  };
+
+  const page = instantiate(loadPage('pages/outbound/task.js'));
+  page.data.session = session;
+  page.data.task = {
+    task_id: 'task-1',
+    status: 'PENDING',
+    expected_tag_suffixes: ['1-1', '1-2'],
+    expected_pallet_count: 2,
+  };
+  page.data.scans = [{
+    suffix: '1-1',
+    recognition: { recognition_id: 'recognition-1' },
+    photo: { photo_id: 'photo-1' },
+  }];
+
+  await page.captureLabel();
+
+  assert.equal(page.data.suffixPickerVisible, true);
+  assert.deepEqual(page.data.suffixChoices, ['1-2']);
+  assert.equal(page.data.scans.length, 1);
+
+  page.selectSuffix({ currentTarget: { dataset: { suffix: '1-2' } } });
+
+  assert.equal(page.data.suffixPickerVisible, false);
+  assert.equal(page.data.scans.length, 2);
+  assert.equal(page.data.scans[1].recognition.recognition_id, 'recognition-2');
+  assert.equal(page.data.can_confirm, true);
 });
 
 test('outbound list refreshes whenever the task screen returns', () => {
