@@ -26,6 +26,20 @@
 
 ## 配送需求识别
 
+### 中文管理端
+
+管理端页面路径为 `/shipyard-outbound`，侧边栏名称为 `Shipyard Outbound`，
+使用页面权限键 `shipyard-outbound`。页面当前提供：
+
+- 拖入或选择船厂 `.xlsx` 托盘工单；
+- 查看识别警告、逐票来源行和原文件下载；
+- 确认或填写原因后作废配送需求；
+- 查看派工单匹配汇总，并在歧义候选间人工匹配；
+- 生成、查看和打开 A4 横向打印发货单。
+
+浏览器上传使用 `multipart/form-data`，由浏览器自行生成 boundary，管理端请求
+层不会错误设置 JSON `Content-Type`。
+
 ### 上传并解析
 
 `POST /api/shipyard/outbound/distribution-imports/preview`
@@ -185,4 +199,6 @@ HTML 转义；页面显示来源派工单、来源文件、需求导入行、分
 - 全新空库执行 `db/schema.sql` 后 085 的 7 张表全部存在；
 - Ruff、格式检查、Bandit 和 `git diff --check` 通过；
 - `pip-audit` 无已知漏洞，`npm audit` 0 个漏洞；
-- 管理端 30 个测试文件、193 项测试和生产构建通过。
+- 管理端 32 个测试文件、199 项测试和生产构建通过；
+- 本期涉及的管理端文件 ESLint、全量生产构建通过；全仓仍有上游基线的
+  `62 errors / 13 warnings`，不能描述为全仓 lint 清洁。

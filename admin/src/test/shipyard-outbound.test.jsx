@@ -1,0 +1,296 @@
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('../api.js', () => ({
+  api: {
+    get: vi.fn(),
+    post: vi.fn(),
+    postForm: vi.fn(),
+    put: vi.fn(),
+  },
+}));
+
+vi.mock('../warehouse.jsx', () => ({
+  useWarehouse: () => ({ warehouseId: 1 }),
+}));
+
+import { api } from '../api.js';
+import ShipyardOutbound from '../pages/ShipyardOutbound.jsx';
+
+function okJson(data) {
+  return Promise.resolve({
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve(data),
+  });
+}
+
+const imports = {
+  imports: [
+    {
+      import_id: 'import-1',
+      import_no: 'DIST-20261027-ABCD1234',
+      source_file_name: '托盘工单.xlsx',
+      status: 'PARSED',
+      line_count: 6,
+      created_at: '2026-10-27T09:00:00+08:00',
+    },
+  ],
+};
+
+const dispatches = {
+  dispatches: [
+    {
+      dispatch_order_id: 'dispatch-1',
+      dispatch_no: 'PT202610270001',
+      dispatch_date: '2026-10-27',
+      status: 'CONFIRMED',
+      line_count: 1,
+      matched_line_count: 0,
+      ambiguous_line_count: 1,
+      unmatched_line_count: 0,
+    },
+  ],
+};
+
+const notes = { delivery_notes: [] };
+
+const importDetail = {
+  import: {
+    import_id: 'import-1',
+    import_no: 'DIST-20261027-ABCD1234',
+    source_file_name: '托盘工单.xlsx',
+    status: 'PARSED',
+    metadata: { sheet_name: '托盘工单' },
+  },
+  lines: [
+    {
+      line_id: 'line-1',
+      source_row_no: '2',
+      engineering_no: 'H1613',
+      section_no: '101',
+      pallet_no: 'P-1',
+      pallet_name: '测试托盘',
+      demand_window_raw: '2026-10-27 08:00~09:00',
+      delivery_status: '未到',
+    },
+  ],
+  warnings: [],
+};
+
+const dispatchDetail = {
+  dispatch: {
+    dispatch_order_id: 'dispatch-1',
+    dispatch_no: 'PT202610270001',
+    dispatch_date: '2026-10-27',
+    source_type: 'IMAGE_OCR',
+    source_file_name: 'dispatch.jpg',
+    status: 'CONFIRMED',
+  },
+  lines: [
+    {
+      dispatch_line_id: 'dispatch-line-1',
+      line_no: '1',
+      engineering_no: 'H1613',
+      pallet_no: 'P-1',
+      material_spec_raw: '电舾件',
+      specification: '0083-85',
+      quantity: '4',
+      unit: '件',
+      match_status: 'AMBIGUOUS',
+      demand_import_no: null,
+      demand_source_row_no: null,
+      match_details: {
+        candidates: [
+          {
+            line_id: 'line-1',
+            import_no: 'DIST-20261027-ABCD1234',
+            source_row_no: '2',
+            pallet_name: '测试托盘',
+          },
+        ],
+      },
+    },
+  ],
+  match_summary: { matched: 0, ambiguous: 1, unmatched: 0 },
+};
+
+describe('ShipyardOutbound', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(api.get).mockImplementation((path) => {
+      if (path.endsWith('/distribution-imports/import-1')) {
+        return okJson(importDetail);
+      }
+      if (path.endsWith('/dispatches/dispatch-1')) {
+        return okJson(dispatchDetail);
+      }
+      if (path.includes('distribution-imports')) return okJson(imports);
+      if (path.includes('dispatches')) return okJson(dispatches);
+      if (path.includes('delivery-notes')) return okJson(notes);
+      return okJson({});
+    });
+  });
+
+  it('loads the warehouse-scoped work queues', async () => {
+    render(<ShipyardOutbound />);
+
+    expect(await screen.findByText('DIST-20261027-ABCD1234')).toBeInTheDocument();
+    expect(screen.getByText('PT202610270001')).toBeInTheDocument();
+    expect(screen.getByText('还没有发货单')).toBeInTheDocument();
+    expect(api.get).toHaveBeenCalledWith(
+      '/shipyard/outbound/distribution-imports?warehouse_id=1',
+    );
+    expect(api.get).toHaveBeenCalledWith(
+      '/shipyard/outbound/dispatches?warehouse_id=1',
+    );
+  });
+
+  it('uploads the selected demand workbook as multipart data', async () => {
+    vi.mocked(api.postForm).mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({
+        import: {
+          import_id: 'import-2',
+          import_no: 'DIST-NEW',
+          status: 'PARSED',
+          metadata: { sheet_name: '托盘工单' },
+        },
+        lines: [
+          {
+            line_id: 'line-1',
+            source_row_no: '2',
+            engineering_no: 'H1613',
+            section_no: '101',
+            pallet_no: 'P-1',
+            pallet_name: '测试托盘',
+            demand_window_raw: '2026-10-27 08:00~09:00',
+            delivery_status: '未到',
+          },
+        ],
+        warnings: [],
+      }),
+    });
+    const { container } = render(<ShipyardOutbound />);
+    await screen.findByText('DIST-20261027-ABCD1234');
+
+    const input = container.querySelector('input[type="file"]');
+    fireEvent.change(input, {
+      target: {
+        files: [
+          new File(['xlsx'], '船厂配送.xlsx', {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          }),
+        ],
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '识别并保存' }));
+
+    await waitFor(() => expect(api.postForm).toHaveBeenCalledTimes(1));
+    const [path, form] = vi.mocked(api.postForm).mock.calls[0];
+    expect(path).toBe('/shipyard/outbound/distribution-imports/preview');
+    expect(form.get('warehouse_id')).toBe('1');
+    expect(form.get('file').name).toBe('船厂配送.xlsx');
+    expect(await screen.findByText('配送需求预览 · DIST-NEW')).toBeInTheDocument();
+  });
+
+  it('confirms a parsed import only after opening its detail', async () => {
+    vi.mocked(api.post).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        ...importDetail,
+        import: { ...importDetail.import, status: 'CONFIRMED' },
+      }),
+    });
+    render(<ShipyardOutbound />);
+    await screen.findByText('DIST-20261027-ABCD1234');
+
+    fireEvent.click(screen.getByRole('button', { name: '查看' }));
+    expect(await screen.findByText('配送需求预览 · DIST-20261027-ABCD1234'))
+      .toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '确认导入' }));
+
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith(
+      '/shipyard/outbound/distribution-imports/import-1/confirm',
+      {},
+    ));
+    expect(await screen.findByText('配送需求已确认，可参与派工单匹配'))
+      .toBeInTheDocument();
+  });
+
+  it('manually resolves an ambiguous demand and creates a delivery note', async () => {
+    vi.mocked(api.put).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        ...dispatchDetail,
+        lines: [{
+          ...dispatchDetail.lines[0],
+          match_status: 'MANUAL',
+          demand_import_no: 'DIST-20261027-ABCD1234',
+          demand_source_row_no: '2',
+        }],
+      }),
+    });
+    vi.mocked(api.post).mockImplementation((path, body) => {
+      if (path.endsWith('/delivery-note')) {
+        return Promise.resolve({
+          ok: true,
+          status: 201,
+          json: () => Promise.resolve({
+            delivery_note: {
+              delivery_note_id: 'note-1',
+              delivery_note_no: body.delivery_note_no,
+              dispatch_no: 'PT202610270001',
+              issue_date: body.issue_date,
+            },
+            lines: [
+              {
+                delivery_line_id: 'delivery-line-1',
+                line_no: '1',
+                engineering_no: 'H1613',
+                section_no: '101',
+                pallet_no: 'P-1',
+                material_description: '电舾件',
+                specification: '0083-85',
+                quantity: '4',
+                unit: '件',
+                demand_import_no: 'DIST-20261027-ABCD1234',
+                demand_source_row_no: '2',
+              },
+            ],
+          }),
+        });
+      }
+      return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
+    });
+    render(<ShipyardOutbound />);
+    await screen.findByText('PT202610270001');
+    fireEvent.click(screen.getByRole('button', { name: '处理' }));
+
+    const candidate = await screen.findByLabelText('派工行 1 候选需求');
+    fireEvent.change(candidate, { target: { value: 'line-1' } });
+    fireEvent.click(screen.getByRole('button', { name: '匹配' }));
+    await waitFor(() => expect(api.put).toHaveBeenCalledWith(
+      '/shipyard/outbound/dispatch-lines/dispatch-line-1/demand-match',
+      { demand_line_id: 'line-1' },
+    ));
+
+    fireEvent.change(screen.getByLabelText('发货单号'), {
+      target: { value: 'FH-TEST-001' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '生成发货单' }));
+
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith(
+      '/shipyard/outbound/dispatches/dispatch-1/delivery-note',
+      expect.objectContaining({
+        delivery_note_no: 'FH-TEST-001',
+        issue_date: expect.any(String),
+        idempotency_key: expect.stringContaining('delivery-note-'),
+      }),
+    ));
+    expect(await screen.findByText('发货单 · FH-TEST-001')).toBeInTheDocument();
+  });
+});

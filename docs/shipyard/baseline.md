@@ -56,7 +56,7 @@ Commands use a dedicated `sentry_test` database.
 
 ```text
 Backend: 3016 passed, 55 skipped, 11 warnings in 331.53s
-Admin:   30 test files passed, 193 tests passed
+Admin:   32 test files passed, 199 tests passed
 Build:   API, workers, dispatcher, and admin images built successfully
 Health:  GET /api/health -> {"service":"sentry-wms","status":"ok"}
 Admin:   GET / -> HTTP 200
@@ -85,7 +85,8 @@ PyJWT to 2.15.0, and refreshed the remaining locked transitive packages.
 - `npm audit`: 0 vulnerabilities;
 - admin test suite: 30 files and 193 tests passed;
 - admin production build: passed;
-- admin lint still reports the upstream baseline's 64 errors and 13 warnings.
+- admin lint still reports 62 errors and 13 warnings after removing two
+  unused variables in touched files.
 
 The admin lint debt is not introduced by the shipyard domain and must not be
 described as clean until it is reduced and re-verified.
@@ -107,6 +108,8 @@ The third slice adds shipyard distribution-demand Excel recognition,
 warehouse-scoped dispatch matching, source-line lineage and printable front
 warehouse delivery notes. `085_shipyard_outbound_documents.sql` is idempotent
 and the consolidated `db/schema.sql` contains the same final structures.
+The React admin now exposes `/shipyard-outbound` for import review, match
+resolution, delivery-note generation and printing.
 
 The next slice is shipyard outbound-manifest recognition, whole-ticket scan
 depletion and loading confirmation. Generic Sentry `items` / `inventory`

@@ -1,0 +1,831 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { api } from '../api.js';
+import PageHeader from '../components/PageHeader.jsx';
+import { useWarehouse } from '../warehouse.jsx';
+
+const IMPORT_STATUS = {
+  PARSED: '待确认',
+  CONFIRMED: '已确认',
+  VOID: '已作废',
+};
+
+const MATCH_STATUS = {
+  MATCHED: '已自动匹配',
+  MANUAL: '已人工匹配',
+  AMBIGUOUS: '待选需求',
+  UNMATCHED: '未匹配',
+};
+
+const DISPATCH_STATUS = {
+  CONFIRMED: '有效',
+  CANCELLED: '已取消',
+};
+
+function todayIso() {
+  const now = new Date();
+  const offset = now.getTimezoneOffset() * 60_000;
+  return new Date(now.getTime() - offset).toISOString().slice(0, 10);
+}
+
+function randomId(prefix) {
+  const suffix = globalThis.crypto?.randomUUID?.()
+    || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${prefix}-${suffix}`;
+}
+
+function defaultNoteNumber() {
+  return `FH-${todayIso().replaceAll('-', '')}-${String(Date.now()).slice(-4)}`;
+}
+
+function formatTime(value) {
+  if (!value) return '—';
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime())
+    ? value
+    : parsed.toLocaleString('zh-CN', { hour12: false });
+}
+
+async function requireJson(response, fallback) {
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.message || data.error || fallback);
+  }
+  return data;
+}
+
+async function loadWorkspaceData(warehouseId) {
+  const responses = await Promise.all([
+    api.get(`/shipyard/outbound/distribution-imports?warehouse_id=${warehouseId}`),
+    api.get(`/shipyard/outbound/dispatches?warehouse_id=${warehouseId}`),
+    api.get(`/shipyard/outbound/delivery-notes?warehouse_id=${warehouseId}`),
+  ]);
+  const [importsData, dispatchData, notesData] = await Promise.all([
+    requireJson(responses[0], '无法读取配送需求'),
+    requireJson(responses[1], '无法读取派工单'),
+    requireJson(responses[2], '无法读取发货单'),
+  ]);
+  return {
+    imports: importsData.imports || [],
+    dispatches: dispatchData.dispatches || [],
+    deliveryNotes: notesData.delivery_notes || [],
+  };
+}
+
+function Status({ value, labels }) {
+  return (
+    <span className={`shipyard-status shipyard-status-${String(value).toLowerCase()}`}>
+      {labels[value] || value || '—'}
+    </span>
+  );
+}
+
+export default function ShipyardOutbound() {
+  const { warehouseId } = useWarehouse();
+  const fileRef = useRef(null);
+  const [imports, setImports] = useState([]);
+  const [dispatches, setDispatches] = useState([]);
+  const [deliveryNotes, setDeliveryNotes] = useState([]);
+  const [selectedImport, setSelectedImport] = useState(null);
+  const [selectedDispatch, setSelectedDispatch] = useState(null);
+  const [selectedNote, setSelectedNote] = useState(null);
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [dragging, setDragging] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState('');
+  const [notice, setNotice] = useState(null);
+  const [voidReason, setVoidReason] = useState('');
+  const [noteNo, setNoteNo] = useState(defaultNoteNumber);
+  const [issueDate, setIssueDate] = useState(todayIso);
+  const [manualDemandIds, setManualDemandIds] = useState({});
+
+  const notesByDispatch = useMemo(
+    () => new Map(deliveryNotes.map((note) => [note.dispatch_order_id, note])),
+    [deliveryNotes],
+  );
+
+  const refreshAll = useCallback(async () => {
+    if (!warehouseId) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const data = await loadWorkspaceData(warehouseId);
+      setImports(data.imports);
+      setDispatches(data.dispatches);
+      setDeliveryNotes(data.deliveryNotes);
+    } catch (error) {
+      setNotice({ type: 'error', message: error.message });
+    } finally {
+      setLoading(false);
+    }
+  }, [warehouseId]);
+
+  useEffect(() => {
+    if (!warehouseId) return undefined;
+    let cancelled = false;
+    loadWorkspaceData(warehouseId)
+      .then((data) => {
+        if (cancelled) return;
+        setImports(data.imports);
+        setDispatches(data.dispatches);
+        setDeliveryNotes(data.deliveryNotes);
+      })
+      .catch((error) => {
+        if (!cancelled) setNotice({ type: 'error', message: error.message });
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [warehouseId]);
+
+  function acceptFile(file) {
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.xlsx')) {
+      setNotice({ type: 'error', message: '首期只接受船厂下发的 .xlsx 配送需求表' });
+      return;
+    }
+    setSelectedFile(file);
+    setNotice(null);
+  }
+
+  async function uploadDemand() {
+    if (!warehouseId || !selectedFile) return;
+    setBusy('upload');
+    setNotice(null);
+    try {
+      const form = new FormData();
+      form.append('warehouse_id', String(warehouseId));
+      form.append('file', selectedFile);
+      const response = await api.postForm(
+        '/shipyard/outbound/distribution-imports/preview',
+        form,
+      );
+      const data = await requireJson(response, '配送需求识别失败');
+      setSelectedImport(data);
+      setSelectedFile(null);
+      if (fileRef.current) fileRef.current.value = '';
+      const warningCount = data.warnings?.length || 0;
+      setNotice({
+        type: warningCount ? 'warning' : 'success',
+        message: `已识别 ${data.lines?.length || 0} 票配送需求并保存原文件${warningCount ? `，有 ${warningCount} 条识别提醒需要确认` : ''}`,
+      });
+      await refreshAll();
+    } catch (error) {
+      setNotice({ type: 'error', message: error.message });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function openImport(importId) {
+    setBusy(`import-${importId}`);
+    try {
+      const response = await api.get(
+        `/shipyard/outbound/distribution-imports/${importId}`,
+      );
+      setSelectedImport(await requireJson(response, '无法读取配送需求详情'));
+      setVoidReason('');
+    } catch (error) {
+      setNotice({ type: 'error', message: error.message });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function confirmImport() {
+    if (!selectedImport) return;
+    const importId = selectedImport.import.import_id;
+    setBusy('confirm-import');
+    try {
+      const response = await api.post(
+        `/shipyard/outbound/distribution-imports/${importId}/confirm`,
+        {},
+      );
+      setSelectedImport(await requireJson(response, '确认配送需求失败'));
+      setNotice({ type: 'success', message: '配送需求已确认，可参与派工单匹配' });
+      await refreshAll();
+    } catch (error) {
+      setNotice({ type: 'error', message: error.message });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function voidImport() {
+    if (!selectedImport || !voidReason.trim()) {
+      setNotice({ type: 'error', message: '作废前请填写原因' });
+      return;
+    }
+    const importId = selectedImport.import.import_id;
+    setBusy('void-import');
+    try {
+      const response = await api.post(
+        `/shipyard/outbound/distribution-imports/${importId}/void`,
+        { reason: voidReason.trim() },
+      );
+      setSelectedImport(await requireJson(response, '作废配送需求失败'));
+      setNotice({ type: 'success', message: '配送需求已作废，可重新导入同一文件' });
+      await refreshAll();
+    } catch (error) {
+      setNotice({ type: 'error', message: error.message });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function openDispatch(dispatchId) {
+    setBusy(`dispatch-${dispatchId}`);
+    setSelectedNote(null);
+    try {
+      const response = await api.get(`/shipyard/outbound/dispatches/${dispatchId}`);
+      setSelectedDispatch(await requireJson(response, '无法读取派工单详情'));
+      setNoteNo(defaultNoteNumber());
+      setIssueDate(todayIso());
+      setManualDemandIds({});
+    } catch (error) {
+      setNotice({ type: 'error', message: error.message });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function matchLine(line) {
+    const demandLineId = manualDemandIds[line.dispatch_line_id];
+    if (!selectedDispatch || !demandLineId) {
+      setNotice({ type: 'error', message: '请先选择一条候选配送需求' });
+      return;
+    }
+    setBusy(`match-${line.dispatch_line_id}`);
+    try {
+      const response = await api.put(
+        `/shipyard/outbound/dispatch-lines/${line.dispatch_line_id}/demand-match`,
+        { demand_line_id: demandLineId },
+      );
+      setSelectedDispatch(await requireJson(response, '人工匹配失败'));
+      setNotice({ type: 'success', message: `派工行 ${line.line_no} 已人工匹配` });
+      await refreshAll();
+    } catch (error) {
+      setNotice({ type: 'error', message: error.message });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function createDeliveryNote() {
+    if (!selectedDispatch) return;
+    if (!noteNo.trim()) {
+      setNotice({ type: 'error', message: '请填写发货单号' });
+      return;
+    }
+    const dispatchId = selectedDispatch.dispatch.dispatch_order_id;
+    setBusy('create-note');
+    try {
+      const response = await api.post(
+        `/shipyard/outbound/dispatches/${dispatchId}/delivery-note`,
+        {
+          delivery_note_no: noteNo.trim(),
+          issue_date: issueDate,
+          idempotency_key: randomId('delivery-note'),
+        },
+      );
+      const data = await requireJson(response, '生成发货单失败');
+      setSelectedNote(data);
+      setNotice({ type: 'success', message: '发货单已生成，可打开打印视图' });
+      await refreshAll();
+    } catch (error) {
+      setNotice({ type: 'error', message: error.message });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function openDeliveryNote(noteId) {
+    setBusy(`note-${noteId}`);
+    try {
+      const response = await api.get(`/shipyard/outbound/delivery-notes/${noteId}`);
+      setSelectedNote(await requireJson(response, '无法读取发货单详情'));
+    } catch (error) {
+      setNotice({ type: 'error', message: error.message });
+    } finally {
+      setBusy('');
+    }
+  }
+
+  if (!warehouseId) {
+    return (
+      <div>
+        <PageHeader title="船厂出库单据" />
+        <div className="settings-section">请先在顶部选择仓库。</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="shipyard-page">
+      <PageHeader title="船厂出库单据">
+        <button className="btn" onClick={refreshAll} disabled={loading || !!busy}>
+          {loading ? '读取中…' : '刷新'}
+        </button>
+      </PageHeader>
+
+      {notice && (
+        <div className={`shipyard-notice shipyard-notice-${notice.type}`} role="status">
+          <span>{notice.message}</span>
+          <button className="btn btn-sm" onClick={() => setNotice(null)}>关闭</button>
+        </div>
+      )}
+
+      <section className="settings-section">
+        <div className="shipyard-section-heading">
+          <div>
+            <h3>1. 导入船厂配送需求</h3>
+            <p className="settings-note">
+              拖入船厂托盘工单。系统先识别、保存原文件，人工确认后才参与派工匹配。
+            </p>
+          </div>
+        </div>
+        <div
+          className={`shipyard-dropzone${dragging ? ' is-dragging' : ''}`}
+          onDragEnter={(event) => {
+            event.preventDefault();
+            setDragging(true);
+          }}
+          onDragOver={(event) => event.preventDefault()}
+          onDragLeave={(event) => {
+            event.preventDefault();
+            setDragging(false);
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            setDragging(false);
+            acceptFile(event.dataTransfer.files?.[0]);
+          }}
+        >
+          <input
+            ref={fileRef}
+            id="shipyard-demand-file"
+            type="file"
+            accept=".xlsx"
+            onChange={(event) => acceptFile(event.target.files?.[0])}
+          />
+          <label htmlFor="shipyard-demand-file">
+            <strong>{selectedFile ? selectedFile.name : '拖入或选择船厂托盘工单'}</strong>
+            <span>仅支持 .xlsx；单文件最大 10 MiB</span>
+          </label>
+          <button
+            className="btn btn-primary"
+            onClick={uploadDemand}
+            disabled={!selectedFile || busy === 'upload'}
+          >
+            {busy === 'upload' ? '识别中…' : '识别并保存'}
+          </button>
+        </div>
+
+        <div className="table-wrap shipyard-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>导入号</th>
+                <th>来源文件</th>
+                <th>票数</th>
+                <th>状态</th>
+                <th>导入时间</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {imports.map((item) => (
+                <tr key={item.import_id}>
+                  <td>{item.import_no}</td>
+                  <td>{item.source_file_name}</td>
+                  <td>{item.line_count}</td>
+                  <td><Status value={item.status} labels={IMPORT_STATUS} /></td>
+                  <td>{formatTime(item.created_at)}</td>
+                  <td>
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => openImport(item.import_id)}
+                      disabled={busy === `import-${item.import_id}`}
+                    >
+                      查看
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!imports.length && (
+                <tr><td colSpan="6" className="empty-state">还没有配送需求导入</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {selectedImport && (
+        <section className="settings-section">
+          <div className="shipyard-section-heading">
+            <div>
+              <h3>配送需求预览 · {selectedImport.import.import_no}</h3>
+              <p className="settings-note">
+                {selectedImport.import.metadata?.sheet_name || '—'}
+                {' · '}
+                {selectedImport.lines.length} 票
+              </p>
+            </div>
+            <div className="shipyard-actions">
+              {selectedImport.import.status === 'PARSED' && (
+                <button
+                  className="btn btn-primary"
+                  onClick={confirmImport}
+                  disabled={busy === 'confirm-import'}
+                >
+                  确认导入
+                </button>
+              )}
+              {selectedImport.import.status !== 'VOID' && (
+                <>
+                  <input
+                    className="input shipyard-inline-input"
+                    value={voidReason}
+                    onChange={(event) => setVoidReason(event.target.value)}
+                    placeholder="作废原因"
+                  />
+                  <button
+                    className="btn"
+                    onClick={voidImport}
+                    disabled={busy === 'void-import'}
+                  >
+                    作废
+                  </button>
+                </>
+              )}
+              <a
+                className="btn"
+                href={`/api/shipyard/outbound/distribution-imports/${selectedImport.import.import_id}/file`}
+              >
+                下载原文件
+              </a>
+            </div>
+          </div>
+
+          {!!selectedImport.warnings?.length && (
+            <div className="shipyard-warning-list">
+              {selectedImport.warnings.map((warning) => (
+                <div key={`${warning.code}-${warning.column || ''}`}>
+                  <strong>{warning.code}</strong> {warning.message}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="table-wrap shipyard-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>来源行</th>
+                  <th>工程号</th>
+                  <th>分段</th>
+                  <th>托盘号</th>
+                  <th>托盘名称</th>
+                  <th>需求时间</th>
+                  <th>配送状态</th>
+                </tr>
+              </thead>
+              <tbody>
+                {selectedImport.lines.map((line) => (
+                  <tr key={line.line_id}>
+                    <td>{line.source_row_no}</td>
+                    <td>{line.engineering_no}</td>
+                    <td>{line.section_no}</td>
+                    <td>{line.pallet_no}</td>
+                    <td>{line.pallet_name}</td>
+                    <td>{line.demand_window_raw || '—'}</td>
+                    <td>{line.delivery_status || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
+      <section className="settings-section">
+        <div className="shipyard-section-heading">
+          <div>
+            <h3>2. 派工单与需求匹配</h3>
+            <p className="settings-note">
+              唯一匹配自动通过；歧义或未匹配保留在派工单中，不阻塞现场先收单。
+            </p>
+          </div>
+        </div>
+        <div className="table-wrap shipyard-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>派工单号</th>
+                <th>派工日期</th>
+                <th>明细</th>
+                <th>已匹配</th>
+                <th>待选</th>
+                <th>未匹配</th>
+                <th>状态</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {dispatches.map((item) => (
+                <tr key={item.dispatch_order_id}>
+                  <td>{item.dispatch_no}</td>
+                  <td>{item.dispatch_date}</td>
+                  <td>{item.line_count}</td>
+                  <td>{item.matched_line_count}</td>
+                  <td>{item.ambiguous_line_count}</td>
+                  <td>{item.unmatched_line_count}</td>
+                  <td><Status value={item.status} labels={DISPATCH_STATUS} /></td>
+                  <td>
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => openDispatch(item.dispatch_order_id)}
+                      disabled={busy === `dispatch-${item.dispatch_order_id}`}
+                    >
+                      处理
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {!dispatches.length && (
+                <tr><td colSpan="8" className="empty-state">还没有派工单</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {selectedDispatch && (
+        <section className="settings-section">
+          <div className="shipyard-section-heading">
+            <div>
+              <h3>派工单 · {selectedDispatch.dispatch.dispatch_no}</h3>
+              <p className="settings-note">
+                {selectedDispatch.dispatch.dispatch_date}
+                {' · '}
+                来源 {selectedDispatch.dispatch.source_file_name || selectedDispatch.dispatch.source_type}
+              </p>
+            </div>
+          </div>
+          <div className="table-wrap shipyard-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>行</th>
+                  <th>工程号</th>
+                  <th>托盘号</th>
+                  <th>物资</th>
+                  <th>数量</th>
+                  <th>匹配状态</th>
+                  <th>来源需求</th>
+                  <th>人工处理</th>
+                </tr>
+              </thead>
+              <tbody>
+                {selectedDispatch.lines.map((line) => {
+                  const candidates = line.match_details?.candidates || [];
+                  return (
+                    <tr key={line.dispatch_line_id}>
+                      <td>{line.line_no}</td>
+                      <td>{line.engineering_no}</td>
+                      <td>{line.pallet_no}</td>
+                      <td>
+                        {line.material_spec_raw}
+                        {line.specification && (
+                          <div className="settings-note">{line.specification}</div>
+                        )}
+                      </td>
+                      <td>{line.quantity} {line.unit}</td>
+                      <td><Status value={line.match_status} labels={MATCH_STATUS} /></td>
+                      <td>
+                        {line.demand_import_no
+                          ? `${line.demand_import_no} / 行 ${line.demand_source_row_no || '—'}`
+                          : '—'}
+                      </td>
+                      <td>
+                        {['AMBIGUOUS', 'UNMATCHED'].includes(line.match_status) && (
+                          <div className="shipyard-match-control">
+                            {candidates.length > 0 ? (
+                              <select
+                                className="input"
+                                aria-label={`派工行 ${line.line_no} 候选需求`}
+                                value={manualDemandIds[line.dispatch_line_id] || ''}
+                                onChange={(event) => setManualDemandIds((current) => ({
+                                  ...current,
+                                  [line.dispatch_line_id]: event.target.value,
+                                }))}
+                              >
+                                <option value="">选择候选</option>
+                                {candidates.map((candidate) => (
+                                  <option key={candidate.line_id} value={candidate.line_id}>
+                                    {candidate.import_no} / 行 {candidate.source_row_no} / {candidate.pallet_name}
+                                  </option>
+                                ))}
+                              </select>
+                            ) : (
+                              <input
+                                className="input"
+                                aria-label={`派工行 ${line.line_no} 需求行 ID`}
+                                placeholder="需求行 ID"
+                                value={manualDemandIds[line.dispatch_line_id] || ''}
+                                onChange={(event) => setManualDemandIds((current) => ({
+                                  ...current,
+                                  [line.dispatch_line_id]: event.target.value,
+                                }))}
+                              />
+                            )}
+                            <button
+                              className="btn btn-sm"
+                              onClick={() => matchLine(line)}
+                              disabled={
+                                !manualDemandIds[line.dispatch_line_id]
+                                || busy === `match-${line.dispatch_line_id}`
+                              }
+                            >
+                              匹配
+                            </button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="shipyard-note-builder">
+            <div>
+              <h4>生成前置仓发货单</h4>
+              <p className="settings-note">
+                一张派工单只生成一张发货单，系统会固化来源需求行和打印内容。
+              </p>
+            </div>
+            {notesByDispatch.has(selectedDispatch.dispatch.dispatch_order_id) ? (
+              <button
+                className="btn btn-primary"
+                onClick={() => openDeliveryNote(
+                  notesByDispatch.get(selectedDispatch.dispatch.dispatch_order_id).delivery_note_id,
+                )}
+              >
+                打开已生成发货单
+              </button>
+            ) : (
+              <div className="shipyard-actions">
+                <label>
+                  <span>发货单号</span>
+                  <input
+                    className="input"
+                    value={noteNo}
+                    onChange={(event) => setNoteNo(event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>发放日期</span>
+                  <input
+                    className="input"
+                    type="date"
+                    value={issueDate}
+                    onChange={(event) => setIssueDate(event.target.value)}
+                  />
+                </label>
+                <button
+                  className="btn btn-primary"
+                  onClick={createDeliveryNote}
+                  disabled={busy === 'create-note'}
+                >
+                  {busy === 'create-note' ? '生成中…' : '生成发货单'}
+                </button>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
+      <section className="settings-section">
+        <div className="shipyard-section-heading">
+          <div>
+            <h3>3. 已生成发货单</h3>
+            <p className="settings-note">打开详情核对来源，再进入 A4 横向打印视图。</p>
+          </div>
+        </div>
+        <div className="table-wrap shipyard-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>发货单号</th>
+                <th>来源派工单</th>
+                <th>发放日期</th>
+                <th>行数</th>
+                <th>总数量</th>
+                <th>状态</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {deliveryNotes.map((item) => (
+                <tr key={item.delivery_note_id}>
+                  <td>{item.delivery_note_no}</td>
+                  <td>{item.dispatch_no}</td>
+                  <td>{item.issue_date}</td>
+                  <td>{item.line_count}</td>
+                  <td>{item.total_quantity}</td>
+                  <td>{item.status}</td>
+                  <td className="shipyard-actions">
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => openDeliveryNote(item.delivery_note_id)}
+                      disabled={busy === `note-${item.delivery_note_id}`}
+                    >
+                      详情
+                    </button>
+                    <a
+                      className="btn btn-sm"
+                      href={`/api/shipyard/outbound/delivery-notes/${item.delivery_note_id}/print`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      打印
+                    </a>
+                  </td>
+                </tr>
+              ))}
+              {!deliveryNotes.length && (
+                <tr><td colSpan="7" className="empty-state">还没有发货单</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {selectedNote && (
+        <section className="settings-section">
+          <div className="shipyard-section-heading">
+            <div>
+              <h3>发货单 · {selectedNote.delivery_note.delivery_note_no}</h3>
+              <p className="settings-note">
+                来源 {selectedNote.delivery_note.dispatch_no}
+                {' · '}
+                {selectedNote.delivery_note.issue_date}
+              </p>
+            </div>
+            <a
+              className="btn btn-primary"
+              href={`/api/shipyard/outbound/delivery-notes/${selectedNote.delivery_note.delivery_note_id}/print`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              打印 A4 横向
+            </a>
+          </div>
+          <div className="table-wrap shipyard-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>行</th>
+                  <th>工程号</th>
+                  <th>分段</th>
+                  <th>托盘号</th>
+                  <th>物资规格</th>
+                  <th>数量</th>
+                  <th>来源需求</th>
+                </tr>
+              </thead>
+              <tbody>
+                {selectedNote.lines.map((line) => (
+                  <tr key={line.delivery_line_id}>
+                    <td>{line.line_no}</td>
+                    <td>{line.engineering_no}</td>
+                    <td>{line.section_no || '—'}</td>
+                    <td>{line.pallet_no}</td>
+                    <td>
+                      {line.material_description}
+                      {line.specification && (
+                        <div className="settings-note">{line.specification}</div>
+                      )}
+                    </td>
+                    <td>{line.quantity} {line.unit}</td>
+                    <td>
+                      {line.demand_import_no
+                        ? `${line.demand_import_no} / 行 ${line.demand_source_row_no || '—'}`
+                        : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}

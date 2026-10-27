@@ -43,6 +43,7 @@ import InterWarehouseTransfers from './pages/InterWarehouseTransfers.jsx';
 import TransferOrders from './pages/TransferOrders.jsx';
 import POSActivity from './pages/POSActivity.jsx';
 import Fraud from './pages/Fraud.jsx';
+import ShipyardOutbound from './pages/ShipyardOutbound.jsx';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -103,6 +104,7 @@ export default function App() {
         <Route path="/sales-orders" element={<ErrorBoundary fallbackMessage="Could not load sales orders."><SalesOrders /></ErrorBoundary>} />
         <Route path="/pos-activity" element={<ErrorBoundary fallbackMessage="Could not load POS activity."><POSActivity /></ErrorBoundary>} />
         <Route path="/fraud" element={<ErrorBoundary fallbackMessage="Could not load fraud queue."><Fraud /></ErrorBoundary>} />
+        <Route path="/shipyard-outbound" element={<ErrorBoundary fallbackMessage="Could not load shipyard outbound documents."><ShipyardOutbound /></ErrorBoundary>} />
         <Route path="/backorders" element={<ErrorBoundary fallbackMessage="Could not load backorders."><Backorders /></ErrorBoundary>} />
         <Route path="/returns" element={<ErrorBoundary fallbackMessage="Could not load returns."><Returns /></ErrorBoundary>}>
           <Route path="rma" element={<RMA />} />
