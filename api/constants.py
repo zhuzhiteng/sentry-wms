@@ -308,6 +308,31 @@ BIN_PICKABLE = "Pickable"
 # User roles
 ROLE_ADMIN = "ADMIN"
 ROLE_USER = "USER"
+ROLE_SHIPYARD_MANAGER = "SHIPYARD_MANAGER"
+ROLE_RECEIVER = "RECEIVER"
+ROLE_OUTBOUND = "OUTBOUND"
+ROLE_VIEWER = "VIEWER"
+
+USER_ROLES = (
+    ROLE_ADMIN,
+    ROLE_USER,
+    ROLE_SHIPYARD_MANAGER,
+    ROLE_RECEIVER,
+    ROLE_OUTBOUND,
+    ROLE_VIEWER,
+)
+
+ALL_MOBILE_FUNCTIONS = (
+    "receive",
+    "putaway",
+    "pick",
+    "pack",
+    "ship",
+    "count",
+    "transfer",
+    "shipyard_receive",
+    "shipyard_outbound",
+)
 
 # Shipyard domain status and audit actions. Shipyard values are namespaced
 # separately from the e-commerce order states so the two domains cannot drift
@@ -421,7 +446,8 @@ ALL_PAGE_KEYS = (
     "items", "vendors",
     "adjustments", "inter-warehouse-transfers", "transfer-orders",
     "warehouses", "bins", "zones", "preferred-bins",
-    "users", "api-tokens", "inbound", "shipyard-outbound", "consumer-groups",
+    "users", "api-tokens", "inbound", "shipyard-outbound", "shipyard-settings",
+    "consumer-groups",
     # Channels (Pipe C): per-channel availability config + the publish
     # health view. Holders see the /channels page and can CRUD channels,
     # pause/resume, and inspect the DLQ.
@@ -445,6 +471,52 @@ OVERRIDE_SO_FULL_EDIT = "so-full-edit"
 ALL_OVERRIDE_KEYS = (
     OVERRIDE_SO_FULL_EDIT,
 )
+
+USER_ROLE_TEMPLATES = {
+    ROLE_ADMIN: {
+        "page_keys": ALL_PAGE_KEYS,
+        "functions": ALL_MOBILE_FUNCTIONS,
+    },
+    ROLE_USER: {
+        "page_keys": ("dashboard",),
+        "functions": (),
+    },
+    ROLE_SHIPYARD_MANAGER: {
+        "page_keys": (
+            "dashboard",
+            "inventory",
+            "inbound",
+            "shipyard-outbound",
+            "shipyard-settings",
+            "audit-log",
+        ),
+        "functions": (
+            "receive",
+            "count",
+            "transfer",
+            "shipyard_receive",
+            "shipyard_outbound",
+        ),
+    },
+    ROLE_RECEIVER: {
+        "page_keys": ("dashboard", "inbound"),
+        "functions": ("shipyard_receive",),
+    },
+    ROLE_OUTBOUND: {
+        "page_keys": ("dashboard", "inventory", "shipyard-outbound"),
+        "functions": ("shipyard_outbound",),
+    },
+    ROLE_VIEWER: {
+        "page_keys": (
+            "dashboard",
+            "inventory",
+            "inbound",
+            "shipyard-outbound",
+            "audit-log",
+        ),
+        "functions": (),
+    },
+}
 
 # SO mutation audit actions (mig 062). Mirror the PO line
 # CRUD coverage so the "what was on this order before it shipped"

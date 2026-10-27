@@ -24,6 +24,9 @@ from services.shipyard.config_service import (
     list_project_bindings as list_project_binding_records,
 )
 from services.shipyard.config_service import (
+    list_storage_location_options as list_storage_location_option_records,
+)
+from services.shipyard.config_service import (
     list_zone_ship_mappings as list_zone_ship_mapping_records,
 )
 from services.shipyard.config_service import (
@@ -34,12 +37,15 @@ from services.shipyard.config_service import (
 )
 from utils.validation import validate_body
 
-from . import shipyard_bp
+from . import require_shipyard_roles, shipyard_bp
+
+CONFIG_PAGE = "shipyard-settings"
+CONFIG_ROLES = ("SHIPYARD_MANAGER",)
 
 
 @shipyard_bp.get("/bindings")
 @require_auth
-@require_admin_or_page_permission("settings")
+@require_admin_or_page_permission(CONFIG_PAGE)
 @with_db
 def list_project_bindings():
     bindings = list_project_binding_records(
@@ -52,7 +58,8 @@ def list_project_bindings():
 
 @shipyard_bp.post("/bindings")
 @require_auth
-@require_admin_or_page_permission("settings")
+@require_shipyard_roles(*CONFIG_ROLES)
+@require_admin_or_page_permission(CONFIG_PAGE)
 @validate_body(CreateProjectBindingRequest)
 @with_db
 def create_project_binding(validated):
@@ -66,7 +73,8 @@ def create_project_binding(validated):
 
 @shipyard_bp.put("/bindings/<int:binding_id>")
 @require_auth
-@require_admin_or_page_permission("settings")
+@require_shipyard_roles(*CONFIG_ROLES)
+@require_admin_or_page_permission(CONFIG_PAGE)
 @validate_body(UpdateProjectBindingRequest)
 @with_db
 def update_project_binding(binding_id, validated):
@@ -81,6 +89,7 @@ def update_project_binding(binding_id, validated):
 
 @shipyard_bp.get("/zone-mappings")
 @require_auth
+@require_admin_or_page_permission(CONFIG_PAGE)
 @with_db
 def list_zone_ship_mappings():
     try:
@@ -99,9 +108,32 @@ def list_zone_ship_mappings():
     return jsonify({"mappings": mappings})
 
 
+@shipyard_bp.get("/zone-mapping-options")
+@require_auth
+@require_admin_or_page_permission(CONFIG_PAGE)
+@with_db
+def list_zone_mapping_options():
+    try:
+        warehouse_id = int(request.args.get("warehouse_id", ""))
+    except (TypeError, ValueError):
+        return jsonify({"error": "warehouse_id is required"}), 400
+    ok, denied = check_warehouse_access(warehouse_id)
+    if not ok:
+        return denied
+    return jsonify(
+        {
+            "locations": list_storage_location_option_records(
+                g.db,
+                warehouse_id=warehouse_id,
+            )
+        }
+    )
+
+
 @shipyard_bp.post("/zone-mappings")
 @require_auth
-@require_admin_or_page_permission("settings")
+@require_shipyard_roles(*CONFIG_ROLES)
+@require_admin_or_page_permission(CONFIG_PAGE)
 @validate_body(CreateZoneShipMappingRequest)
 @with_db
 def create_zone_ship_mapping(validated):
@@ -118,7 +150,8 @@ def create_zone_ship_mapping(validated):
 
 @shipyard_bp.put("/zone-mappings/<int:mapping_id>")
 @require_auth
-@require_admin_or_page_permission("settings")
+@require_shipyard_roles(*CONFIG_ROLES)
+@require_admin_or_page_permission(CONFIG_PAGE)
 @validate_body(UpdateZoneShipMappingRequest)
 @with_db
 def update_zone_ship_mapping(mapping_id, validated):

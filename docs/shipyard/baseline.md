@@ -111,6 +111,11 @@ and the consolidated `db/schema.sql` contains the same final structures.
 The React admin now exposes `/shipyard-outbound` for import review, match
 resolution, delivery-note generation and printing.
 
+Shipyard role templates now cover manager, receiver, outbound operator and
+read-only auditor, with development-only virtual user seeding. The React admin
+exposes `/shipyard-settings` for ship/project bindings and zone-to-ship
+placement rules.
+
 The next slice is shipyard outbound-manifest recognition, whole-ticket scan
 depletion and loading confirmation. Generic Sentry `items` / `inventory`
 synchronization remains deferred until the shipyard material-code mapping is

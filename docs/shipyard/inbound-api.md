@@ -22,6 +22,9 @@ manufacturer_name` 只能存在一条有效绑定。
 
 ### 船号与二级区域定置
 
+中文管理端入口为 `/shipyard-settings`（侧边栏 `Shipyard Settings`）。船厂
+主管可以在页面维护船号/工程号/制作图绑定和区域船号定置，操作员不能修改。
+
 - `GET /api/shipyard/zone-mappings?warehouse_id=1`
 - `POST /api/shipyard/zone-mappings`
 - `PUT /api/shipyard/zone-mappings/<mapping_id>`

@@ -54,6 +54,7 @@ const NAV = [
       // pages (Warehouses / Bins / Zones / Preferred Bins) collapse
       // into a single Data link with a tab strip.
       { to: '/items', label: 'Items', pageKey: 'items' },
+      { to: '/shipyard-settings', label: 'Shipyard Settings', pageKey: 'shipyard-settings' },
       { to: '/vendors', label: 'Vendors', pageKey: 'vendors' },
       { to: '/adjustments', label: 'Inventory Adjustments', pageKey: 'adjustments' },
       { to: '/inter-warehouse-transfers', label: 'Inventory Transfers', pageKey: 'inter-warehouse-transfers' },

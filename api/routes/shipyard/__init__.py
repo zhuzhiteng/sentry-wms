@@ -1,6 +1,7 @@
 """Shipyard WMS API routes."""
 
 import logging
+from functools import wraps
 
 from flask import Blueprint, g, jsonify
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -9,6 +10,28 @@ from services.shipyard.errors import ShipyardServiceError
 
 shipyard_bp = Blueprint("shipyard", __name__)
 _LOGGER = logging.getLogger(__name__)
+
+
+def require_shipyard_roles(*roles):
+    """Allow the listed business roles, with ADMIN retaining full access."""
+
+    def decorator(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            current_user = getattr(g, "current_user", {})
+            role = current_user.get("role")
+            if role == "ADMIN" or role in roles:
+                return view(*args, **kwargs)
+            return jsonify(
+                {
+                    "error": "role_forbidden",
+                    "required_roles": list(roles),
+                }
+            ), 403
+
+        return wrapped
+
+    return decorator
 
 
 @shipyard_bp.errorhandler(ShipyardServiceError)
@@ -50,4 +73,4 @@ def _database_error(exc):
     return jsonify({"error": "shipyard_database_unavailable"}), 503
 
 
-from routes.shipyard import config, inbound, outbound, receipts  # noqa: F401
+from routes.shipyard import config, inbound, outbound, receipts  # noqa: E402, F401

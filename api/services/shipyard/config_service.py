@@ -286,6 +286,40 @@ def list_zone_ship_mappings(
     return [_mapping_payload(row) for row in rows]
 
 
+def list_storage_location_options(
+    db,
+    *,
+    warehouse_id: int,
+) -> list[dict[str, Any]]:
+    rows = db.execute(
+        text(
+            """
+            SELECT b.bin_id, b.bin_code, b.bin_type,
+                   z.zone_id, z.zone_code, z.zone_name, z.zone_type
+              FROM bins b
+              JOIN zones z ON z.zone_id = b.zone_id
+             WHERE b.warehouse_id = :warehouse_id
+               AND COALESCE(z.is_active, TRUE) = TRUE
+             ORDER BY z.zone_code, b.bin_code
+            """
+        ),
+        {"warehouse_id": warehouse_id},
+    ).fetchall()
+    return [
+        {
+            "bin_id": row.bin_id,
+            "bin_code": row.bin_code,
+            "bin_type": row.bin_type,
+            "zone_id": row.zone_id,
+            "zone_code": row.zone_code,
+            "zone_name": row.zone_name,
+            "zone_type": row.zone_type,
+            "location_path": f"{row.zone_code} / {row.bin_code}",
+        }
+        for row in rows
+    ]
+
+
 def _bin_for_warehouse(db, bin_id: int, warehouse_id: int):
     return db.execute(
         text(

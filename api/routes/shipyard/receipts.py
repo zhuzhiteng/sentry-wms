@@ -35,7 +35,9 @@ from utils.uploads import (
 )
 from utils.validation import validate_body
 
-from . import shipyard_bp
+from . import require_shipyard_roles, shipyard_bp
+
+RECEIPT_WRITE_ROLES = ("SHIPYARD_MANAGER", "RECEIVER")
 
 
 def _check_ticket_access(ticket_id):
@@ -46,6 +48,7 @@ def _check_ticket_access(ticket_id):
 
 @shipyard_bp.post("/inbound/tickets/<uuid:ticket_id>/scan")
 @require_auth
+@require_shipyard_roles(*RECEIPT_WRITE_ROLES)
 @require_admin_or_page_permission("inbound")
 @validate_body(PalletScanRequest)
 @with_db
@@ -63,6 +66,7 @@ def scan_inbound_pallet(ticket_id, validated):
 
 @shipyard_bp.post("/inbound/tickets/<uuid:ticket_id>/photos")
 @require_auth
+@require_shipyard_roles(*RECEIPT_WRITE_ROLES)
 @require_admin_or_page_permission("inbound")
 @with_db
 def upload_inbound_ticket_photo(ticket_id):
@@ -103,6 +107,7 @@ def upload_inbound_ticket_photo(ticket_id):
 
 @shipyard_bp.post("/inbound/tickets/<uuid:ticket_id>/receipts")
 @require_auth
+@require_shipyard_roles(*RECEIPT_WRITE_ROLES)
 @require_admin_or_page_permission("inbound")
 @validate_body(ReceiveTicketRequest)
 @with_db
@@ -121,6 +126,7 @@ def receive_inbound_ticket(ticket_id, validated):
 
 @shipyard_bp.put("/inbound/tickets/<uuid:ticket_id>/shortage")
 @require_auth
+@require_shipyard_roles(*RECEIPT_WRITE_ROLES)
 @require_admin_or_page_permission("inbound")
 @validate_body(ShortageReportRequest)
 @with_db

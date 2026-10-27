@@ -46,10 +46,11 @@ from utils.uploads import (
 )
 from utils.validation import validate_body
 
-from . import shipyard_bp
+from . import require_shipyard_roles, shipyard_bp
 
 XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 OUTBOUND_PAGE = "shipyard-outbound"
+OUTBOUND_DOCUMENT_EDIT_ROLES = ("SHIPYARD_MANAGER",)
 
 
 def _list_limit() -> int:
@@ -83,6 +84,7 @@ def get_distribution_imports():
 
 @shipyard_bp.post("/outbound/distribution-imports/preview")
 @require_auth
+@require_shipyard_roles(*OUTBOUND_DOCUMENT_EDIT_ROLES)
 @require_admin_or_page_permission(OUTBOUND_PAGE)
 @with_db
 def preview_distribution_import():
@@ -172,6 +174,7 @@ def download_distribution_file(import_id):
 
 @shipyard_bp.post("/outbound/distribution-imports/<uuid:import_id>/confirm")
 @require_auth
+@require_shipyard_roles(*OUTBOUND_DOCUMENT_EDIT_ROLES)
 @require_admin_or_page_permission(OUTBOUND_PAGE)
 @validate_body(ConfirmDistributionImportRequest)
 @with_db
@@ -191,6 +194,7 @@ def confirm_distribution(import_id, validated):
 
 @shipyard_bp.post("/outbound/distribution-imports/<uuid:import_id>/void")
 @require_auth
+@require_shipyard_roles(*OUTBOUND_DOCUMENT_EDIT_ROLES)
 @require_admin_or_page_permission(OUTBOUND_PAGE)
 @validate_body(VoidDistributionImportRequest)
 @with_db
@@ -226,6 +230,7 @@ def get_dispatches():
 
 @shipyard_bp.post("/outbound/dispatches")
 @require_auth
+@require_shipyard_roles(*OUTBOUND_DOCUMENT_EDIT_ROLES)
 @require_admin_or_page_permission(OUTBOUND_PAGE)
 @validate_body(CreateDispatchRequest)
 @with_db
@@ -258,6 +263,7 @@ def get_dispatch(dispatch_order_id):
 
 @shipyard_bp.put("/outbound/dispatch-lines/<uuid:dispatch_line_id>/demand-match")
 @require_auth
+@require_shipyard_roles(*OUTBOUND_DOCUMENT_EDIT_ROLES)
 @require_admin_or_page_permission(OUTBOUND_PAGE)
 @validate_body(MatchDispatchLineRequest)
 @with_db
@@ -290,6 +296,7 @@ def match_dispatch_demand(dispatch_line_id, validated):
 
 @shipyard_bp.post("/outbound/dispatches/<uuid:dispatch_order_id>/delivery-note")
 @require_auth
+@require_shipyard_roles(*OUTBOUND_DOCUMENT_EDIT_ROLES)
 @require_admin_or_page_permission(OUTBOUND_PAGE)
 @validate_body(CreateDeliveryNoteRequest)
 @with_db

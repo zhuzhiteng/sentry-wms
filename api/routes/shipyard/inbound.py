@@ -32,7 +32,9 @@ from utils.uploads import (
 )
 from utils.validation import validate_body
 
-from . import shipyard_bp
+from . import require_shipyard_roles, shipyard_bp
+
+MANIFEST_EDIT_ROLES = ("SHIPYARD_MANAGER",)
 
 XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -55,6 +57,7 @@ def get_inbound_manifests():
 
 @shipyard_bp.post("/inbound/manifests/preview")
 @require_auth
+@require_shipyard_roles(*MANIFEST_EDIT_ROLES)
 @require_admin_or_page_permission("inbound")
 @with_db
 def preview_inbound_manifest():
@@ -149,6 +152,7 @@ def download_inbound_manifest_file(manifest_id):
 
 @shipyard_bp.post("/inbound/manifests/<uuid:manifest_id>/confirm")
 @require_auth
+@require_shipyard_roles(*MANIFEST_EDIT_ROLES)
 @require_admin_or_page_permission("inbound")
 @validate_body(ConfirmInboundManifestRequest)
 @with_db
@@ -168,6 +172,7 @@ def confirm_inbound_manifest(manifest_id, validated):
 
 @shipyard_bp.post("/inbound/manifests/<uuid:manifest_id>/void")
 @require_auth
+@require_shipyard_roles(*MANIFEST_EDIT_ROLES)
 @require_admin_or_page_permission("inbound")
 @validate_body(VoidInboundManifestRequest)
 @with_db
