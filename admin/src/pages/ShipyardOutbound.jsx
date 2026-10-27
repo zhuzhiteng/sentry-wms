@@ -67,30 +67,40 @@ async function requireJson(response, fallback) {
   return data;
 }
 
-async function loadWorkspaceData(warehouseId) {
+async function loadFormalWorkspace(warehouseId) {
   const responses = await Promise.all([
     api.get(`/shipyard/outbound/formal-manifests?warehouse_id=${warehouseId}`),
     api.get(`/shipyard/outbound/orders?warehouse_id=${warehouseId}`),
+  ]);
+  const [
+    formalManifestData,
+    formalOrderData,
+  ] = await Promise.all([
+    requireJson(responses[0], '无法读取正式出库清单'),
+    requireJson(responses[1], '无法读取正式出库单'),
+  ]);
+  return {
+    formalManifests: formalManifestData.manifests || [],
+    formalOrders: formalOrderData.orders || [],
+  };
+}
+
+async function loadDeliveryWorkspace(warehouseId) {
+  const responses = await Promise.all([
     api.get(`/shipyard/outbound/distribution-imports?warehouse_id=${warehouseId}`),
     api.get(`/shipyard/outbound/dispatches?warehouse_id=${warehouseId}`),
     api.get(`/shipyard/outbound/delivery-notes?warehouse_id=${warehouseId}`),
   ]);
   const [
-    formalManifestData,
-    formalOrderData,
     importsData,
     dispatchData,
     notesData,
   ] = await Promise.all([
-    requireJson(responses[0], '无法读取正式出库清单'),
-    requireJson(responses[1], '无法读取正式出库单'),
-    requireJson(responses[2], '无法读取配送需求'),
-    requireJson(responses[3], '无法读取派工单'),
-    requireJson(responses[4], '无法读取发货单'),
+    requireJson(responses[0], '无法读取配送需求'),
+    requireJson(responses[1], '无法读取派工单'),
+    requireJson(responses[2], '无法读取发货单'),
   ]);
   return {
-    formalManifests: formalManifestData.manifests || [],
-    formalOrders: formalOrderData.orders || [],
     imports: importsData.imports || [],
     dispatches: dispatchData.dispatches || [],
     deliveryNotes: notesData.delivery_notes || [],
@@ -109,6 +119,13 @@ export default function ShipyardOutbound() {
   const { warehouseId } = useWarehouse();
   const fileRef = useRef(null);
   const formalFileRef = useRef(null);
+  const formalPreviewRef = useRef(null);
+  const formalOrderRef = useRef(null);
+  const importPreviewRef = useRef(null);
+  const dispatchPreviewRef = useRef(null);
+  const deliveryNoteRef = useRef(null);
+  const [activeWorkspace, setActiveWorkspace] = useState('formal');
+  const [deliveryLoaded, setDeliveryLoaded] = useState(false);
   const [formalManifests, setFormalManifests] = useState([]);
   const [formalOrders, setFormalOrders] = useState([]);
   const [selectedFormal, setSelectedFormal] = useState(null);
@@ -136,38 +153,101 @@ export default function ShipyardOutbound() {
     () => new Map(deliveryNotes.map((note) => [note.dispatch_order_id, note])),
     [deliveryNotes],
   );
+  const selectedFormalOrderId = selectedFormalOrder?.order?.outbound_order_id;
+  const selectedFormalManifestId = selectedFormal?.manifest?.manifest_id;
+  const selectedImportId = selectedImport?.import?.import_id;
+  const selectedDispatchId = selectedDispatch?.dispatch?.dispatch_order_id;
+  const selectedNoteId = selectedNote?.delivery_note?.delivery_note_id;
 
-  const refreshAll = useCallback(async () => {
+  const refreshFormalWorkspace = useCallback(async () => {
     if (!warehouseId) {
       setLoading(false);
       return;
     }
     setLoading(true);
     try {
-      const data = await loadWorkspaceData(warehouseId);
+      const data = await loadFormalWorkspace(warehouseId);
       setFormalManifests(data.formalManifests);
       setFormalOrders(data.formalOrders);
-      setImports(data.imports);
-      setDispatches(data.dispatches);
-      setDeliveryNotes(data.deliveryNotes);
+      if (selectedFormalOrderId) {
+        const detailResponse = await api.get(
+          `/shipyard/outbound/orders/${selectedFormalOrderId}`,
+        );
+        setSelectedFormalOrder(
+          await requireJson(detailResponse, '无法读取出库任务'),
+        );
+      }
+      if (selectedFormalManifestId) {
+        const detailResponse = await api.get(
+          `/shipyard/outbound/formal-manifests/${selectedFormalManifestId}`,
+        );
+        setSelectedFormal(
+          await requireJson(detailResponse, '无法读取正式出库清单'),
+        );
+      }
     } catch (error) {
       setNotice({ type: 'error', message: error.message });
     } finally {
       setLoading(false);
     }
-  }, [warehouseId]);
+  }, [warehouseId, selectedFormalManifestId, selectedFormalOrderId]);
+
+  const refreshDeliveryWorkspace = useCallback(async () => {
+    if (!warehouseId) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const data = await loadDeliveryWorkspace(warehouseId);
+      setImports(data.imports);
+      setDispatches(data.dispatches);
+      setDeliveryNotes(data.deliveryNotes);
+      setDeliveryLoaded(true);
+      if (selectedImportId) {
+        const detailResponse = await api.get(
+          `/shipyard/outbound/distribution-imports/${selectedImportId}`,
+        );
+        setSelectedImport(
+          await requireJson(detailResponse, '无法读取配送需求详情'),
+        );
+      }
+      if (selectedDispatchId) {
+        const detailResponse = await api.get(
+          `/shipyard/outbound/dispatches/${selectedDispatchId}`,
+        );
+        setSelectedDispatch(
+          await requireJson(detailResponse, '无法读取派工单详情'),
+        );
+      }
+      if (selectedNoteId) {
+        const detailResponse = await api.get(
+          `/shipyard/outbound/delivery-notes/${selectedNoteId}`,
+        );
+        setSelectedNote(
+          await requireJson(detailResponse, '无法读取发货单详情'),
+        );
+      }
+    } catch (error) {
+      setNotice({ type: 'error', message: error.message });
+    } finally {
+      setLoading(false);
+    }
+  }, [
+    warehouseId,
+    selectedDispatchId,
+    selectedImportId,
+    selectedNoteId,
+  ]);
 
   useEffect(() => {
     if (!warehouseId) return undefined;
     let cancelled = false;
-    loadWorkspaceData(warehouseId)
+    loadFormalWorkspace(warehouseId)
       .then((data) => {
         if (cancelled) return;
         setFormalManifests(data.formalManifests);
         setFormalOrders(data.formalOrders);
-        setImports(data.imports);
-        setDispatches(data.dispatches);
-        setDeliveryNotes(data.deliveryNotes);
       })
       .catch((error) => {
         if (!cancelled) setNotice({ type: 'error', message: error.message });
@@ -179,6 +259,62 @@ export default function ShipyardOutbound() {
       cancelled = true;
     };
   }, [warehouseId]);
+
+  useEffect(() => {
+    if (!selectedFormalManifestId) return;
+    formalPreviewRef.current?.scrollIntoView?.({
+      behavior: 'smooth',
+      block: 'start',
+    });
+  }, [selectedFormalManifestId]);
+
+  useEffect(() => {
+    if (!selectedFormalOrderId) return;
+    formalOrderRef.current?.scrollIntoView?.({
+      behavior: 'smooth',
+      block: 'start',
+    });
+  }, [selectedFormalOrderId]);
+
+  useEffect(() => {
+    if (!selectedImportId) return;
+    importPreviewRef.current?.scrollIntoView?.({
+      behavior: 'smooth',
+      block: 'start',
+    });
+  }, [selectedImportId]);
+
+  useEffect(() => {
+    if (!selectedDispatchId) return;
+    dispatchPreviewRef.current?.scrollIntoView?.({
+      behavior: 'smooth',
+      block: 'start',
+    });
+  }, [selectedDispatchId]);
+
+  useEffect(() => {
+    if (!selectedNoteId) return;
+    deliveryNoteRef.current?.scrollIntoView?.({
+      behavior: 'smooth',
+      block: 'start',
+    });
+  }, [selectedNoteId]);
+
+  async function switchWorkspace(nextWorkspace) {
+    setActiveWorkspace(nextWorkspace);
+    setNotice(null);
+    if (nextWorkspace === 'delivery' && !deliveryLoaded) {
+      await refreshDeliveryWorkspace();
+    }
+  }
+
+  async function refreshActiveWorkspace() {
+    if (activeWorkspace === 'formal') {
+      await refreshFormalWorkspace();
+      return;
+    }
+    await refreshDeliveryWorkspace();
+  }
 
   function acceptFormalFile(file) {
     if (!file) return;
@@ -216,7 +352,7 @@ export default function ShipyardOutbound() {
         type: summary.shortage_line_count ? 'warning' : 'success',
         message: `已识别 ${summary.line_count || 0} 行，匹配 ${summary.task_count || 0} 张整票任务${summary.shortage_line_count ? `，${summary.shortage_line_count} 行库存不足` : ''}`,
       });
-      await refreshAll();
+      await refreshFormalWorkspace();
     } catch (error) {
       setNotice({ type: 'error', message: error.message });
     } finally {
@@ -226,6 +362,7 @@ export default function ShipyardOutbound() {
 
   async function openFormalManifest(manifestId) {
     setBusy(`formal-${manifestId}`);
+    setSelectedFormalOrder(null);
     try {
       const response = await api.get(
         `/shipyard/outbound/formal-manifests/${manifestId}`,
@@ -240,6 +377,13 @@ export default function ShipyardOutbound() {
 
   async function confirmFormalManifest() {
     if (!selectedFormal) return;
+    if (selectedFormal.validation?.blocking_errors?.length) {
+      setNotice({
+        type: 'error',
+        message: '仍有阻断项，请先处理清单中的绑定或字段错误',
+      });
+      return;
+    }
     const manifestId = selectedFormal.manifest.manifest_id;
     setBusy('formal-confirm');
     try {
@@ -253,8 +397,7 @@ export default function ShipyardOutbound() {
         type: order.summary?.shortage_line_count ? 'warning' : 'success',
         message: `正式出库单 ${order.order?.outbound_order_no || ''} 已生成，共 ${order.summary?.task_count || 0} 张整票任务`,
       });
-      await refreshAll();
-      await openFormalManifest(manifestId);
+      await refreshFormalWorkspace();
     } catch (error) {
       setNotice({ type: 'error', message: error.message });
     } finally {
@@ -264,6 +407,7 @@ export default function ShipyardOutbound() {
 
   async function openFormalOrder(orderId) {
     setBusy(`formal-order-${orderId}`);
+    setSelectedFormal(null);
     try {
       const response = await api.get(`/shipyard/outbound/orders/${orderId}`);
       setSelectedFormalOrder(
@@ -307,7 +451,7 @@ export default function ShipyardOutbound() {
         type: warningCount ? 'warning' : 'success',
         message: `已识别 ${data.lines?.length || 0} 票配送需求并保存原文件${warningCount ? `，有 ${warningCount} 条识别提醒需要确认` : ''}`,
       });
-      await refreshAll();
+      await refreshDeliveryWorkspace();
     } catch (error) {
       setNotice({ type: 'error', message: error.message });
     } finally {
@@ -341,7 +485,7 @@ export default function ShipyardOutbound() {
       );
       setSelectedImport(await requireJson(response, '确认配送需求失败'));
       setNotice({ type: 'success', message: '配送需求已确认，可参与派工单匹配' });
-      await refreshAll();
+      await refreshDeliveryWorkspace();
     } catch (error) {
       setNotice({ type: 'error', message: error.message });
     } finally {
@@ -363,7 +507,7 @@ export default function ShipyardOutbound() {
       );
       setSelectedImport(await requireJson(response, '作废配送需求失败'));
       setNotice({ type: 'success', message: '配送需求已作废，可重新导入同一文件' });
-      await refreshAll();
+      await refreshDeliveryWorkspace();
     } catch (error) {
       setNotice({ type: 'error', message: error.message });
     } finally {
@@ -401,7 +545,7 @@ export default function ShipyardOutbound() {
       );
       setSelectedDispatch(await requireJson(response, '人工匹配失败'));
       setNotice({ type: 'success', message: `派工行 ${line.line_no} 已人工匹配` });
-      await refreshAll();
+      await refreshDeliveryWorkspace();
     } catch (error) {
       setNotice({ type: 'error', message: error.message });
     } finally {
@@ -429,7 +573,7 @@ export default function ShipyardOutbound() {
       const data = await requireJson(response, '生成发货单失败');
       setSelectedNote(data);
       setNotice({ type: 'success', message: '发货单已生成，可打开打印视图' });
-      await refreshAll();
+      await refreshDeliveryWorkspace();
     } catch (error) {
       setNotice({ type: 'error', message: error.message });
     } finally {
@@ -460,8 +604,12 @@ export default function ShipyardOutbound() {
 
   return (
     <div className="shipyard-page">
-      <PageHeader title="船厂出库单据">
-        <button className="btn" onClick={refreshAll} disabled={loading || !!busy}>
+      <PageHeader title="船厂出库">
+        <button
+          className="btn"
+          onClick={refreshActiveWorkspace}
+          disabled={loading || !!busy}
+        >
           {loading ? '读取中…' : '刷新'}
         </button>
       </PageHeader>
@@ -473,10 +621,35 @@ export default function ShipyardOutbound() {
         </div>
       )}
 
+      <div className="shipyard-workspace-switch" role="tablist" aria-label="船厂出库业务">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeWorkspace === 'formal'}
+          className={activeWorkspace === 'formal' ? 'is-active' : ''}
+          onClick={() => switchWorkspace('formal')}
+        >
+          <strong>正式出库</strong>
+          <span>导入、核对、整票出库与装车</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeWorkspace === 'delivery'}
+          className={activeWorkspace === 'delivery' ? 'is-active' : ''}
+          onClick={() => switchWorkspace('delivery')}
+        >
+          <strong>配送与发货</strong>
+          <span>配送需求、派工匹配与前置仓发货单</span>
+        </button>
+      </div>
+
+      {activeWorkspace === 'formal' ? (
+        <>
       <section className="settings-section">
         <div className="shipyard-section-heading">
           <div>
-            <h3>0. 船厂正式出库清单</h3>
+            <h3>导入正式出库清单</h3>
             <p className="settings-note">
               按物料编码、品名、规格、船号/工程号/制作图和整票托盘匹配库存。
               物料编码或品名不一致时只显示缺口，不按名称猜测扣库。
@@ -594,7 +767,7 @@ export default function ShipyardOutbound() {
       </section>
 
       {selectedFormal && (
-        <section className="settings-section">
+        <section className="settings-section" ref={formalPreviewRef}>
           <div className="shipyard-section-heading">
             <div>
               <h3>正式出库清单预览 · {selectedFormal.manifest.manifest_no}</h3>
@@ -611,7 +784,10 @@ export default function ShipyardOutbound() {
                 <button
                   className="btn btn-primary"
                   onClick={confirmFormalManifest}
-                  disabled={busy === 'formal-confirm'}
+                  disabled={
+                    busy === 'formal-confirm'
+                    || !!selectedFormal.validation.blocking_errors?.length
+                  }
                 >
                   {busy === 'formal-confirm' ? '生成中…' : '确认并生成正式出库单'}
                 </button>
@@ -632,6 +808,9 @@ export default function ShipyardOutbound() {
                   <strong>{error.code}</strong> {error.message}
                 </div>
               ))}
+              <a className="btn btn-sm" href="/shipyard-settings">
+                去处理船号与区域绑定
+              </a>
             </div>
           )}
 
@@ -758,7 +937,7 @@ export default function ShipyardOutbound() {
       </section>
 
       {selectedFormalOrder && (
-        <section className="settings-section">
+        <section className="settings-section" ref={formalOrderRef}>
           <div className="shipyard-section-heading">
             <div>
               <h3>正式出库单 · {selectedFormalOrder.order.outbound_order_no}</h3>
@@ -825,10 +1004,13 @@ export default function ShipyardOutbound() {
         </section>
       )}
 
+        </>
+      ) : (
+        <>
       <section className="settings-section">
         <div className="shipyard-section-heading">
           <div>
-            <h3>1. 导入船厂配送需求</h3>
+            <h3>导入配送需求</h3>
             <p className="settings-note">
               拖入船厂托盘工单。系统先识别、保存原文件，人工确认后才参与派工匹配。
             </p>
@@ -911,7 +1093,7 @@ export default function ShipyardOutbound() {
       </section>
 
       {selectedImport && (
-        <section className="settings-section">
+        <section className="settings-section" ref={importPreviewRef}>
           <div className="shipyard-section-heading">
             <div>
               <h3>配送需求预览 · {selectedImport.import.import_no}</h3>
@@ -1001,7 +1183,7 @@ export default function ShipyardOutbound() {
       <section className="settings-section">
         <div className="shipyard-section-heading">
           <div>
-            <h3>2. 派工单与需求匹配</h3>
+            <h3>派工单与需求匹配</h3>
             <p className="settings-note">
               唯一匹配自动通过；歧义或未匹配保留在派工单中，不阻塞现场先收单。
             </p>
@@ -1051,7 +1233,7 @@ export default function ShipyardOutbound() {
       </section>
 
       {selectedDispatch && (
-        <section className="settings-section">
+        <section className="settings-section" ref={dispatchPreviewRef}>
           <div className="shipyard-section-heading">
             <div>
               <h3>派工单 · {selectedDispatch.dispatch.dispatch_no}</h3>
@@ -1200,7 +1382,7 @@ export default function ShipyardOutbound() {
       <section className="settings-section">
         <div className="shipyard-section-heading">
           <div>
-            <h3>3. 已生成发货单</h3>
+            <h3>已生成发货单</h3>
             <p className="settings-note">打开详情核对来源，再进入 A4 横向打印视图。</p>
           </div>
         </div>
@@ -1254,7 +1436,7 @@ export default function ShipyardOutbound() {
       </section>
 
       {selectedNote && (
-        <section className="settings-section">
+        <section className="settings-section" ref={deliveryNoteRef}>
           <div className="shipyard-section-heading">
             <div>
               <h3>发货单 · {selectedNote.delivery_note.delivery_note_no}</h3>
@@ -1311,6 +1493,8 @@ export default function ShipyardOutbound() {
             </table>
           </div>
         </section>
+      )}
+        </>
       )}
     </div>
   );

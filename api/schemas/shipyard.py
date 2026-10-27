@@ -335,8 +335,8 @@ class OutboundPalletScanRequest(BaseModel):
     ship_no: str | None = Field(None, max_length=64)
     engineering_no: str | None = Field(None, max_length=64)
     production_drawing_no: str | None = Field(None, max_length=128)
-    material_code: str | None = Field(None, max_length=128)
-    item_name: str | None = Field(None, max_length=255)
+    material_code: str = Field(..., min_length=1, max_length=128)
+    item_name: str = Field(..., min_length=1, max_length=255)
     batch_no: str | None = Field(None, max_length=128)
     label_quantity: Decimal | None = Field(
         None,
@@ -345,7 +345,7 @@ class OutboundPalletScanRequest(BaseModel):
         decimal_places=3,
     )
 
-    @field_validator("tag_suffix", "qr_payload")
+    @field_validator("tag_suffix", "qr_payload", "material_code", "item_name")
     @classmethod
     def strip_outbound_scan_required(cls, value: str) -> str:
         return _strip_required_text(value)
@@ -354,8 +354,6 @@ class OutboundPalletScanRequest(BaseModel):
         "ship_no",
         "engineering_no",
         "production_drawing_no",
-        "material_code",
-        "item_name",
         "batch_no",
     )
     @classmethod

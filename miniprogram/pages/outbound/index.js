@@ -39,6 +39,10 @@ Page({
     const session = requireSession();
     if (!session) return;
     this.setData({ session, warehouseId: session.warehouseId });
+  },
+
+  onShow() {
+    if (!this.data.session) return;
     this.loadOrders();
   },
 
@@ -61,6 +65,14 @@ Page({
       this.setData({ orders });
       if (this.data.selectedOrder) {
         await this.openOrder(this.data.selectedOrder.order.outbound_order_id);
+      } else {
+        const actionable = orders.filter((item) => (
+          Number(item.pending_task_count || 0) > 0
+          || ['PENDING', 'IN_PROGRESS', 'PARTIAL'].includes(item.status)
+        ));
+        if (actionable.length === 1) {
+          await this.openOrder(actionable[0].outbound_order_id);
+        }
       }
     } catch (error) {
       wx.showToast({ title: error.message, icon: 'none' });

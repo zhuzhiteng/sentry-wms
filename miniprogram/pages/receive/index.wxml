@@ -2,7 +2,7 @@
   <view class="hero">
     <view class="chip">INBOUND</view>
     <view class="hero-title">到货验收</view>
-    <view class="hero-meta">先找到清单行，再连续拍摄整票全部吊牌。</view>
+    <view class="hero-meta">选择待收货票货，连续扫描并拍摄本票吊牌。</view>
   </view>
 
   <view class="section-title">待收货清单</view>
@@ -43,8 +43,9 @@
       <view class="grid-3">
         <view><view class="label">整票计划</view><view class="value">{{item.declared_quantity}}</view></view>
         <view><view class="label">已收</view><view class="value">{{item.received_quantity}}</view></view>
-        <view><view class="label">缺件</view><view class="value">{{item.short_quantity_text}}</view></view>
+        <view><view class="label">剩余应收</view><view class="value">{{item.remaining_quantity_text}}</view></view>
       </view>
+      <view class="pallet-progress">{{item.pallet_progress_text}}</view>
       <view class="area">
         <view class="label">指定区域</view>
         <view class="area-value">{{item.location_path_snapshot}}</view>
@@ -55,7 +56,7 @@
         bindtap="startTicket"
         disabled="{{!item.can_receive}}"
       >
-        开始收货
+        {{item.status === 'PARTIAL' ? '继续补收货' : '开始收货'}}
       </button>
     </view>
   </block>
@@ -73,9 +74,14 @@
         <view><view class="label">整票计划</view><view class="value">{{selectedTicket.declared_quantity}} 件</view></view>
         <view><view class="label">预计托盘</view><view class="value">{{selectedTicket.expected_pallet_count || '未配置'}}</view></view>
       </view>
+      <view class="grid-2 workbench-metrics">
+        <view><view class="label">已收 / 剩余</view><view class="value">{{selectedTicket.received_quantity}} / {{remainingQuantityText}}</view></view>
+        <view><view class="label">本次已扫描托盘</view><view class="value">{{palletProgressText}}</view></view>
+      </view>
 
       <view class="notice">
-        每托一次扫码并拍摄吊牌。吊牌上的件数是整票总数，多托只拍齐托盘，不重复累加数量。
+        每托扫描一次并拍摄吊牌。本次可以少收，但少于剩余应收时必须填写差异原因；
+        整票数量收满时，全部托盘必须齐套。
       </view>
       <view wx:if="{{nextSuffix}}" class="next-suffix">{{nextSuffix}}</view>
       <button
@@ -98,11 +104,11 @@
       </view>
 
       <view class="field">
-        <view class="label">本次整票实收数量</view>
+        <view class="label">本次实收数量（剩余应收 {{remainingQuantityText}}）</view>
         <input class="input" type="digit" value="{{quantity}}" bindinput="onQuantityInput" />
       </view>
       <view class="field">
-        <view class="label">差异原因（少于计划时必填）</view>
+        <view class="label">差异原因（本次少于剩余应收时必填）</view>
         <textarea
           class="textarea"
           maxlength="500"

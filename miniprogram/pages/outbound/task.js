@@ -1,7 +1,7 @@
 const { createIdempotencyKey } = require('../../utils/idempotency');
 const {
   buildOutboundConfirmation,
-  buildScanBody,
+  buildOutboundScanBody,
 } = require('../../utils/payload');
 const { request, upload } = require('../../utils/request');
 const {
@@ -95,6 +95,12 @@ Page({
         throw new Error(`托盘 ${suffix} 已拍摄`);
       }
 
+      const scan = buildOutboundScanBody(suffix, raw, parsed);
+      const validation = await request({
+        path: `/shipyard/outbound/tasks/${task.task_id}/scan`,
+        method: 'POST',
+        data: scan,
+      });
       const media = await wx.chooseMedia({
         count: 1,
         mediaType: ['image'],
@@ -106,12 +112,6 @@ Page({
         path: `/shipyard/outbound/tasks/${task.task_id}/photos`,
         filePath,
         formData: { tag_suffix: suffix },
-      });
-      const scan = buildScanBody(task, suffix, raw, parsed);
-      const validation = await request({
-        path: `/shipyard/outbound/tasks/${task.task_id}/scan`,
-        method: 'POST',
-        data: scan,
       });
       const scans = [
         ...this.data.scans,
@@ -135,10 +135,35 @@ Page({
       wx.showToast({ title: `托盘 ${suffix} 核验通过`, icon: 'success' });
     } catch (error) {
       if (error.errMsg && error.errMsg.includes('cancel')) return;
-      wx.showToast({ title: error.message || '扫码或拍照取消', icon: 'none' });
+      this.showScanError(error);
     } finally {
       this.setData({ busy: false });
     }
+  },
+
+  showScanError(error) {
+    const payload = error.response?.data || {};
+    if (payload.matched_task_id && payload.matched_outbound_order_id) {
+      wx.showModal({
+        title: '吊牌属于另一票货物',
+        content: `该吊牌对应任务 ${payload.matched_task_no || payload.matched_task_id}。当前任务不能继续核销。`,
+        confirmText: '去正确任务',
+        cancelText: '留在当前票',
+        success: (result) => {
+          if (!result.confirm) return;
+          wx.redirectTo({
+            url: `/pages/outbound/task?taskId=${payload.matched_task_id}&orderId=${payload.matched_outbound_order_id}`,
+          });
+        },
+      });
+      return;
+    }
+    wx.showModal({
+      title: '吊牌未通过',
+      content: error.message || '请调整角度后重扫',
+      showCancel: false,
+      confirmText: '重扫',
+    });
   },
 
   askSuffix(defaultSuffix) {

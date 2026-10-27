@@ -1,8 +1,15 @@
 const { createIdempotencyKey } = require('../../utils/idempotency');
-const { buildReceiptConfirmation, buildScanBody } = require('../../utils/payload');
+const {
+  buildReceiptConfirmation,
+  buildReceiptScanBody,
+} = require('../../utils/payload');
+const {
+  remainingQuantity,
+  scanProgress,
+  validateReceiptDraft,
+} = require('../../utils/receipt');
 const { request, upload } = require('../../utils/request');
 const {
-  chooseNextSuffix,
   normalizeSuffix,
   parseQrPayload,
 } = require('../../utils/scan');
@@ -48,6 +55,8 @@ Page({
     cameraVisible: false,
     pendingSuffix: '',
     nextSuffix: '',
+    palletProgressText: '',
+    remainingQuantityText: '',
   },
 
   onLoad() {
@@ -78,6 +87,14 @@ Page({
       this.setData({ manifests });
       if (this.data.selectedManifest) {
         await this.openManifest(this.data.selectedManifest.manifest.manifest_id);
+      } else {
+        const receivable = manifests.filter((item) => (
+          ['CONFIRMED', 'PARTIAL'].includes(item.status)
+          || Number(item.pending_ticket_count || 0) > 0
+        ));
+        if (receivable.length === 1) {
+          await this.openManifest(receivable[0].manifest_id);
+        }
       }
     } catch (error) {
       wx.showToast({ title: error.message, icon: 'none' });
@@ -97,6 +114,8 @@ Page({
         status_label: STATUS_LABELS[ticket.status] || ticket.status,
         status_class: statusClass(ticket.status),
         short_quantity_text: numberText(ticket.short_quantity),
+        remaining_quantity_text: numberText(remainingQuantity(ticket)),
+        pallet_progress_text: scanProgress(ticket, []).text,
         can_receive: ['EXPECTED', 'PARTIAL'].includes(ticket.status),
       }));
       const selectedManifest = { ...data, tickets };
@@ -128,14 +147,17 @@ Page({
       return;
     }
     const remaining = Math.max(
-      Number(ticket.declared_quantity) - Number(ticket.received_quantity),
+      remainingQuantity(ticket),
       0,
     );
+    const progress = scanProgress(ticket, []);
     this.setData({
       selectedTicket: ticket,
       scans: [],
       quantity: numberText(remaining),
       differenceReason: '',
+      palletProgressText: progress.text,
+      remainingQuantityText: numberText(remaining),
     });
     wx.pageScrollTo({ selector: '#ticket-workbench', duration: 250 });
   },
@@ -161,6 +183,12 @@ Page({
         return;
       }
 
+      const scanBody = buildReceiptScanBody(suffix, raw, parsed);
+      const validation = await request({
+        path: `/shipyard/inbound/tickets/${ticket.ticket_id}/scan`,
+        method: 'POST',
+        data: scanBody,
+      });
       const media = await wx.chooseMedia({
         count: 1,
         mediaType: ['image'],
@@ -176,20 +204,6 @@ Page({
           tag_suffix: suffix,
         },
       });
-      const scanBody = buildScanBody(
-        {
-          ...ticket,
-          planned_quantity: ticket.declared_quantity,
-        },
-        suffix,
-        raw,
-        parsed,
-      );
-      const validation = await request({
-        path: `/shipyard/inbound/tickets/${ticket.ticket_id}/scan`,
-        method: 'POST',
-        data: scanBody,
-      });
       const scans = [
         ...this.data.scans,
         {
@@ -201,11 +215,17 @@ Page({
           validation,
         },
       ];
-      const expectedCount = Number(ticket.expected_pallet_count || 0);
-      const nextSuffix = expectedCount > scans.length
-        ? `下一托：${scans.length + 1}/${expectedCount}`
+      const progress = scanProgress(ticket, scans);
+      const nextSuffix = progress.remaining === null
+        ? '可继续扫描下一托'
+        : progress.remaining > 0
+          ? `还差 ${progress.remaining} 托`
         : '';
-      this.setData({ scans, nextSuffix });
+      this.setData({
+        scans,
+        nextSuffix,
+        palletProgressText: progress.text,
+      });
       wx.showToast({ title: `托盘 ${suffix} 已核验`, icon: 'success' });
     } catch (error) {
       if (error.errMsg && error.errMsg.includes('cancel')) return;
@@ -251,30 +271,33 @@ Page({
   removeScan(event) {
     const suffix = event.currentTarget.dataset.suffix;
     const scans = this.data.scans.filter((item) => item.suffix !== suffix);
-    this.setData({ scans });
+    const progress = scanProgress(this.data.selectedTicket, scans);
+    this.setData({
+      scans,
+      palletProgressText: progress.text,
+      nextSuffix: progress.remaining === null
+        ? '可继续扫描下一托'
+        : progress.remaining > 0
+          ? `还差 ${progress.remaining} 托`
+          : '',
+    });
   },
 
   async confirmReceipt() {
     const { selectedTicket, scans, quantity } = this.data;
-    if (!selectedTicket || !scans.length) {
-      wx.showToast({ title: '请先扫码并拍摄吊牌', icon: 'none' });
-      return;
-    }
-    const expected = Number(selectedTicket.expected_pallet_count || 0);
-    if (expected && scans.length < expected) {
-      wx.showToast({ title: `托组未齐，还缺 ${expected - scans.length} 托`, icon: 'none' });
-      return;
-    }
-    if (!Number(quantity) || Number(quantity) <= 0) {
-      wx.showToast({ title: '请填写本次实收数量', icon: 'none' });
-      return;
-    }
     const differenceReason = this.data.differenceReason.trim();
-    if (
-      Number(quantity) < Number(selectedTicket.declared_quantity)
-      && !differenceReason
-    ) {
-      wx.showToast({ title: '实收少于计划时必须填写差异原因', icon: 'none' });
+    const draft = validateReceiptDraft({
+      ticket: selectedTicket,
+      scans,
+      quantity,
+      differenceReason,
+    });
+    if (!draft.ok) {
+      wx.showModal({
+        title: '还不能提交收货',
+        content: draft.error,
+        showCancel: false,
+      });
       return;
     }
     const body = buildReceiptConfirmation({
@@ -296,7 +319,13 @@ Page({
         content: `${result.ticket.item_name}\n实收 ${result.ticket.received_quantity} 件\n区域 ${result.receipt.location_path_snapshot}`,
         showCancel: false,
         success: () => {
-          this.setData({ selectedTicket: null, scans: [] });
+          this.setData({
+            selectedTicket: null,
+            scans: [],
+            nextSuffix: '',
+            palletProgressText: '',
+            remainingQuantityText: '',
+          });
           this.loadManifests();
         },
       });

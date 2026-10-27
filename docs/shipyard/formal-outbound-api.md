@@ -140,11 +140,14 @@ GET /api/shipyard/outbound/mobile/orders/<outbound_order_id>
 
 - 吊牌属于当前票货和当前整票任务；
 - 托盘后缀与实际库存一致；
-- 船号、工程号、制作图、物料编码、品名、批次和整票数量若传入则必须一致；
+- `material_code` 和 `item_name` 必须由当前吊牌实际识别结果提供，不读取任务快照
+  代替吊牌值；
+- 船号、工程号、制作图、批次和整票数量若传入则必须一致；
 - 托盘仍为 `STORED`，任务仍为 `PENDING`。
 
 扫描其他任务的吊牌会返回 `422 outbound_validation_failed`，响应中的
-`matched_task_id`/`matched_task_no` 用于现场返回正确任务。
+`matched_task_id`/`matched_task_no`/`matched_outbound_order_id` 用于现场直接跳转到
+正确任务。
 
 ### 上传吊牌照片
 
@@ -159,6 +162,9 @@ GET /api/shipyard/outbound/mobile/orders/<outbound_order_id>
 
 照片先作为当前任务证据保存。正式核销时会再次校验上传人、票货、任务、托盘和照片
 后缀，并将照片绑定到出库核销记录。
+
+小程序正常路径先完成扫码预校验，校验通过后才调用相机拍摄并上传留证照片。这样扫错
+任务、重复吊牌或字段不一致时不会先产生一张未绑定照片。
 
 ## 确认整票出库
 
@@ -242,11 +248,17 @@ HTTPS API 域名、微信 request/uploadFile 合法域名和真实 AppID。
 
 ## 验证
 
-- 全后端：`3031 passed, 55 skipped, 11 warnings`；
+- 全后端：`3032 passed, 55 skipped, 11 warnings`；
 - 086 迁移在开发库和 `sentry_test` 连续执行两次成功；
 - 全新空库执行 `db/schema.sql` 后，正式出库、任务、核销和装车 4 类核心表均存在；
-- 管理端：32 个测试文件、200 项测试通过，生产构建通过；
+- 管理端：32 个测试文件、203 项测试通过，生产构建通过；
 - 本次触及的管理端文件 ESLint 通过；
-- 微信小程序：8 项 Node 测试通过，全部 JavaScript 文件语法检查通过；
+- 微信小程序：17 项 Node 测试通过，全部 JavaScript 文件语法检查通过；
 - Ruff、格式检查、Bandit、`git diff --check` 通过；
 - `pip-audit` 无已知漏洞，`npm audit` 为 0 个漏洞。
+
+本切片还使用本地开发库做了一次真实 HTTP 闭环：创建船号绑定和区域 → 导入并确认
+到货清单 → 相机证据上传模拟 → 单托收货入库 → 导入并确认正式出库清单 → 扫码
+核验物料编码/品名 → 上传出库照片 → 扣减库存 → 整单装车。最终库存余额为
+`0.000`、出库单为 `LOADED`，后台刷新后同步显示现场出库人和时间。该验证不等于
+真实仓库 UAT；小程序真机、真实吊牌和 Chrome 文件选择仍待现场/设备验证。

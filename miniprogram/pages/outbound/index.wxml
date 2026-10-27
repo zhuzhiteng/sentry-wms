@@ -69,7 +69,7 @@
         bindtap="openTask"
         disabled="{{!item.can_outbound}}"
       >
-        {{item.can_outbound ? '已出库' : '查看核销记录'}}
+        {{item.can_outbound ? '开始整票出库' : '查看核销记录'}}
       </button>
       <view wx:if="{{item.confirmation}}" class="confirmation">
         {{item.confirmation.outbound_by}} · {{item.confirmation.outbound_at}}

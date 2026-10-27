@@ -165,7 +165,8 @@ def _pallet_by_qr(db, qr_hash: str):
             SELECT p.pallet_id, p.ticket_id, p.tag_suffix, p.qr_payload,
                    p.qr_payload_sha256, p.factory_pallet_no,
                    p.installation_pallet_no, p.batch_no, p.status,
-                   t.task_id, t.task_no, t.status AS task_status
+                   t.task_id, t.task_no, t.outbound_order_id,
+                   t.status AS task_status
               FROM shipyard_pallet_units p
               LEFT JOIN shipyard_outbound_tasks t
                 ON t.ticket_id = p.ticket_id
@@ -242,6 +243,9 @@ def validate_outbound_pallet_scan(
                 "tag_suffix": pallet.tag_suffix,
                 "matched_task_id": (str(pallet.task_id) if pallet.task_id else None),
                 "matched_task_no": pallet.task_no,
+                "matched_outbound_order_id": (
+                    str(pallet.outbound_order_id) if pallet.outbound_order_id else None
+                ),
             },
         )
     if pallet.status != SHIPYARD_PALLET_STORED:

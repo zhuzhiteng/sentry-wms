@@ -1,17 +1,46 @@
-function buildScanBody(task, suffix, qrPayload, parsed) {
-  return {
+function parsedQuantity(value) {
+  if (value === null || value === undefined || value === '') return undefined;
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : undefined;
+}
+
+function omitEmpty(body) {
+  return Object.fromEntries(
+    Object.entries(body).filter(([, value]) => (
+      value !== undefined && value !== null && value !== ''
+    )),
+  );
+}
+
+function buildReceiptScanBody(suffix, qrPayload, parsed) {
+  return omitEmpty({
     tag_suffix: suffix,
     qr_payload: qrPayload,
-    ship_no: task.ship_no,
-    engineering_no: task.engineering_no,
-    production_drawing_no: task.production_drawing_no,
-    material_code: task.material_code,
-    item_name: task.item_name,
+    ship_no: parsed.ship_no,
+    engineering_no: parsed.engineering_no,
+    production_drawing_no: parsed.production_drawing_no,
+    qr_pallet_no: parsed.qr_pallet_no,
     batch_no: parsed.batch_no || undefined,
-    label_quantity: parsed.label_quantity
-      ? Number(parsed.label_quantity)
-      : Number(task.planned_quantity || task.declared_quantity),
-  };
+    manufacturer_name: parsed.manufacturer_name,
+    installation_pallet_no: parsed.installation_pallet_no,
+    installation_pallet_name: parsed.installation_pallet_name,
+    destination: parsed.destination,
+    label_quantity: parsedQuantity(parsed.label_quantity),
+  });
+}
+
+function buildOutboundScanBody(suffix, qrPayload, parsed) {
+  return omitEmpty({
+    tag_suffix: suffix,
+    qr_payload: qrPayload,
+    ship_no: parsed.ship_no,
+    engineering_no: parsed.engineering_no,
+    production_drawing_no: parsed.production_drawing_no,
+    material_code: parsed.material_code,
+    item_name: parsed.item_name,
+    batch_no: parsed.batch_no,
+    label_quantity: parsedQuantity(parsed.label_quantity),
+  });
 }
 
 function buildOutboundConfirmation(idempotencyKey, evidence, deviceId) {
@@ -47,6 +76,7 @@ function buildReceiptConfirmation({
 
 module.exports = {
   buildOutboundConfirmation,
+  buildOutboundScanBody,
   buildReceiptConfirmation,
-  buildScanBody,
+  buildReceiptScanBody,
 };

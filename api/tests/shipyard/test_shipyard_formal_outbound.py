@@ -381,6 +381,70 @@ def test_whole_ticket_outbound_photos_stock_and_loading(
     assert repeated_loading.get_json()["order"]["status"] == "LOADED"
 
 
+def test_outbound_scan_requires_label_identity_and_points_to_the_right_task(
+    client,
+    auth_headers,
+):
+    first_ticket = _received_material_ticket(
+        client,
+        auth_headers,
+        material_code="MAT-FIRST",
+        item_name="首票物料",
+    )
+    second_ticket = _received_material_ticket(
+        client,
+        auth_headers,
+        material_code="MAT-SECOND",
+        item_name="第二票物料",
+    )
+    _first_manifest, first_order = _preview_and_confirm_outbound(
+        client,
+        auth_headers,
+        ship_no=first_ticket["ship_no"],
+        material_code="MAT-FIRST",
+        item_name="首票物料",
+    )
+    _second_manifest, second_order = _preview_and_confirm_outbound(
+        client,
+        auth_headers,
+        ship_no=second_ticket["ship_no"],
+        material_code="MAT-SECOND",
+        item_name="第二票物料",
+    )
+    first_task = first_order["tasks"][0]
+    second_task = second_order["tasks"][0]
+
+    missing_identity = client.post(
+        f"/api/shipyard/outbound/tasks/{first_task['task_id']}/scan",
+        json={
+            "tag_suffix": "1-1",
+            "qr_payload": _known_qr(first_ticket["ship_no"], "1-1"),
+        },
+        headers=auth_headers,
+    )
+    assert missing_identity.status_code == 400
+    assert missing_identity.get_json()["error"] == "validation_error"
+
+    wrong_task = client.post(
+        f"/api/shipyard/outbound/tasks/{first_task['task_id']}/scan",
+        json={
+            "tag_suffix": "1-1",
+            "qr_payload": _known_qr(second_ticket["ship_no"], "1-1"),
+            "material_code": "MAT-SECOND",
+            "item_name": "第二票物料",
+        },
+        headers=auth_headers,
+    )
+    assert wrong_task.status_code == 422
+    data = wrong_task.get_json()
+    assert data["error"] == "outbound_validation_failed"
+    assert data["matched_task_id"] == second_task["task_id"]
+    assert data["matched_task_no"] == second_task["task_no"]
+    assert (
+        data["matched_outbound_order_id"] == second_order["order"]["outbound_order_id"]
+    )
+
+
 def test_outbound_does_not_split_ticket_larger_than_remaining_demand(
     client,
     auth_headers,

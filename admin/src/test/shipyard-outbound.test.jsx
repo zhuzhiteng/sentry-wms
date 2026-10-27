@@ -165,10 +165,18 @@ const dispatchDetail = {
   match_summary: { matched: 0, ambiguous: 1, unmatched: 0 },
 };
 
+async function openDeliveryWorkspace() {
+  fireEvent.click(screen.getByRole('tab', { name: /配送与发货/ }));
+  await screen.findByText('DIST-20261027-ABCD1234');
+}
+
 describe('ShipyardOutbound', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.mocked(api.get).mockImplementation((path) => {
+      if (path.endsWith('/formal-manifests/formal-1')) {
+        return okJson(formalDetail);
+      }
       if (path.endsWith('/distribution-imports/import-1')) {
         return okJson(importDetail);
       }
@@ -184,9 +192,21 @@ describe('ShipyardOutbound', () => {
     });
   });
 
-  it('loads the warehouse-scoped work queues', async () => {
+  it('loads only the formal queue first and opens delivery on demand', async () => {
     render(<ShipyardOutbound />);
 
+    expect(await screen.findByText('还没有正式出库清单')).toBeInTheDocument();
+    expect(api.get).toHaveBeenCalledWith(
+      '/shipyard/outbound/formal-manifests?warehouse_id=1',
+    );
+    expect(api.get).toHaveBeenCalledWith(
+      '/shipyard/outbound/orders?warehouse_id=1',
+    );
+    expect(api.get).not.toHaveBeenCalledWith(
+      '/shipyard/outbound/distribution-imports?warehouse_id=1',
+    );
+
+    await openDeliveryWorkspace();
     expect(await screen.findByText('DIST-20261027-ABCD1234')).toBeInTheDocument();
     expect(screen.getByText('PT202610270001')).toBeInTheDocument();
     expect(screen.getByText('还没有发货单')).toBeInTheDocument();
@@ -225,7 +245,8 @@ describe('ShipyardOutbound', () => {
       }),
     });
     const { container } = render(<ShipyardOutbound />);
-    await screen.findByText('DIST-20261027-ABCD1234');
+    await screen.findByText('导入正式出库清单');
+    await openDeliveryWorkspace();
 
     const input = container.querySelector('#shipyard-demand-file');
     fireEvent.change(input, {
@@ -254,7 +275,7 @@ describe('ShipyardOutbound', () => {
       json: () => Promise.resolve(formalDetail),
     });
     const { container } = render(<ShipyardOutbound />);
-    await screen.findByText('DIST-20261027-ABCD1234');
+    await screen.findByText('导入正式出库清单');
 
     const input = container.querySelector('#shipyard-formal-outbound-file');
     fireEvent.change(input, {
@@ -288,7 +309,8 @@ describe('ShipyardOutbound', () => {
       }),
     });
     render(<ShipyardOutbound />);
-    await screen.findByText('DIST-20261027-ABCD1234');
+    await screen.findByText('导入正式出库清单');
+    await openDeliveryWorkspace();
 
     fireEvent.click(screen.getByRole('button', { name: '查看' }));
     expect(await screen.findByText('配送需求预览 · DIST-20261027-ABCD1234'))
@@ -300,6 +322,51 @@ describe('ShipyardOutbound', () => {
       {},
     ));
     expect(await screen.findByText('配送需求已确认，可参与派工单匹配'))
+      .toBeInTheDocument();
+  });
+
+  it('keeps the generated order visible after confirming a formal manifest', async () => {
+    vi.mocked(api.postForm).mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve(formalDetail),
+    });
+    vi.mocked(api.post).mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        order: {
+          outbound_order_id: 'formal-order-1',
+          outbound_order_no: 'OUT-FORMAL-1',
+          factory_shipment_no: 'CX-20261027-001',
+          status: 'PENDING',
+        },
+        summary: {
+          task_count: 1,
+          pending_task_count: 1,
+          outbound_task_count: 0,
+          shortage_line_count: 0,
+        },
+        tasks: [],
+      }),
+    });
+    const { container } = render(<ShipyardOutbound />);
+    await screen.findByText('导入正式出库清单');
+    fireEvent.change(container.querySelector('#shipyard-formal-outbound-file'), {
+      target: {
+        files: [
+          new File(['xlsx'], 'formal.xlsx', {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          }),
+        ],
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '识别并匹配库存' }));
+    fireEvent.click(await screen.findByRole('button', {
+      name: '确认并生成正式出库单',
+    }));
+
+    expect(await screen.findByText('正式出库单 · OUT-FORMAL-1'))
       .toBeInTheDocument();
   });
 
@@ -350,6 +417,8 @@ describe('ShipyardOutbound', () => {
       return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) });
     });
     render(<ShipyardOutbound />);
+    await screen.findByText('导入正式出库清单');
+    await openDeliveryWorkspace();
     await screen.findByText('PT202610270001');
     fireEvent.click(screen.getByRole('button', { name: '处理' }));
 
@@ -375,5 +444,104 @@ describe('ShipyardOutbound', () => {
       }),
     ));
     expect(await screen.findByText('发货单 · FH-TEST-001')).toBeInTheDocument();
+  });
+
+  it('does not offer confirmation while the formal preview has blocking errors', async () => {
+    vi.mocked(api.postForm).mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({
+        ...formalDetail,
+        validation: {
+          ...formalDetail.validation,
+          blocking_errors: [{
+            code: 'BINDING_CONFIGURATION_REQUIRED',
+            message: '项目绑定配置缺失',
+          }],
+        },
+      }),
+    });
+    const { container } = render(<ShipyardOutbound />);
+    await screen.findByText('导入正式出库清单');
+
+    fireEvent.change(container.querySelector('#shipyard-formal-outbound-file'), {
+      target: {
+        files: [
+          new File(['xlsx'], 'blocked.xlsx', {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          }),
+        ],
+      },
+    });
+    fireEvent.click(screen.getByRole('button', { name: '识别并匹配库存' }));
+
+    expect(await screen.findByText('BINDING_CONFIGURATION_REQUIRED')).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: '确认并生成正式出库单' }),
+    ).toBeDisabled();
+    expect(screen.getByRole('link', { name: '去处理船号与区域绑定' }))
+      .toHaveAttribute('href', '/shipyard-settings');
+  });
+
+  it('refreshes an open outbound order after field work changes its status', async () => {
+    let fieldWorkComplete = false;
+    const pendingOrder = {
+      outbound_order_id: 'order-live',
+      outbound_order_no: 'OUT-LIVE',
+      factory_shipment_no: 'CX-LIVE',
+      line_count: 1,
+      task_count: 1,
+      pending_task_count: 1,
+      total_required_quantity: '4.000',
+      total_fulfilled_quantity: '0.000',
+      status: 'PENDING',
+    };
+    const orderDetail = () => ({
+      order: {
+        outbound_order_id: 'order-live',
+        outbound_order_no: 'OUT-LIVE',
+        factory_shipment_no: 'CX-LIVE',
+        status: fieldWorkComplete ? 'LOADED' : 'PENDING',
+      },
+      summary: {
+        pending_task_count: fieldWorkComplete ? 0 : 1,
+        outbound_task_count: fieldWorkComplete ? 1 : 0,
+      },
+      tasks: [{
+        task_id: 'task-live',
+        task_no: 'TASK-LIVE',
+        source_row_no: '1',
+        material_code: 'MAT-LIVE',
+        item_name: '现场物料',
+        item_spec: 'S-1',
+        ticket_no: 'TICKET-LIVE',
+        location_path_snapshot: 'A 区 / A1',
+        planned_quantity: '4.000',
+        expected_tag_suffixes: ['1-1'],
+        status: fieldWorkComplete ? 'OUTBOUND' : 'PENDING',
+        confirmation: fieldWorkComplete
+          ? { outbound_by: 'field-operator', outbound_at: '2026-10-27T12:00:00+08:00' }
+          : null,
+      }],
+    });
+    vi.mocked(api.get).mockImplementation((requestPath) => {
+      if (requestPath.includes('/outbound/orders/order-live')) {
+        return okJson(orderDetail());
+      }
+      if (requestPath.includes('formal-manifests')) return okJson(formalManifests);
+      if (requestPath.includes('/outbound/orders')) {
+        return okJson({ orders: [{ ...pendingOrder }] });
+      }
+      return okJson({});
+    });
+
+    render(<ShipyardOutbound />);
+    fireEvent.click(await screen.findByRole('button', { name: '查看任务' }));
+    expect(await screen.findByText('正式出库单 · OUT-LIVE')).toBeInTheDocument();
+
+    fieldWorkComplete = true;
+    fireEvent.click(screen.getByRole('button', { name: '刷新' }));
+
+    expect(await screen.findByText(/field-operator/)).toBeInTheDocument();
   });
 });
