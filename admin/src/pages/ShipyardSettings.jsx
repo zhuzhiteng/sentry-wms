@@ -274,9 +274,10 @@ export default function ShipyardSettings() {
       <section className="settings-section">
         <div className="shipyard-section-heading">
           <div>
-            <h3>船号 / 工程号 / 制作图绑定</h3>
+            <h3>全局船号 / 工程号 / 制作图绑定</h3>
             <p className="settings-note">
-              入库、出库和吊牌扫描都按这组绑定关系校验。
+              所有仓库共享这组船号主数据。修改需要船厂主管角色和设置页权限，并会写入审计；
+              仓库隔离适用于清单、票货、托盘、照片和区域定置。
             </p>
           </div>
         </div>

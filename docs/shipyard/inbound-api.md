@@ -20,10 +20,16 @@ Sentry WMS 的账号、仓库授权、审计日志和数据库事务。
 同一组 `ship_no + engineering_no + production_drawing_no +
 manufacturer_name` 只能存在一条有效绑定。
 
+船号/工程号/制作图绑定是系统级项目主数据，所有仓库共享，不复制成仓库级记录。
+这样同一船号跨多个仓库存放时不会产生互相冲突的绑定副本。写入必须同时具备
+`SHIPYARD_MANAGER` 角色和 `shipyard-settings` 页面权限，并写入审计日志。
+清单、票货、托盘、照片和区域定置仍按所属仓库执行隔离。
+
 ### 船号与二级区域定置
 
 中文管理端入口为 `/shipyard-settings`（侧边栏 `Shipyard Settings`）。船厂
-主管可以在页面维护船号/工程号/制作图绑定和区域船号定置，操作员不能修改。
+主管可以在页面维护全局船号/工程号/制作图绑定和当前仓库的区域船号定置，
+操作员不能修改。
 
 - `GET /api/shipyard/zone-mappings?warehouse_id=1`
 - `POST /api/shipyard/zone-mappings`

@@ -56,6 +56,7 @@ from shipyard.helpers import (
 )
 
 from app import create_app
+from services.rate_limit import limiter
 from services.shipyard import (
     outbound_turnover_service,
     receipt_service,
@@ -151,15 +152,28 @@ def _create_role_session(
     return _login_session(api_base, username, password)
 
 
+def _positive_env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 def _parallel_json_posts(
     api_base: str,
     session: requests.Session,
     path: str,
     payload: dict,
     *,
-    count: int = 50,
-    max_workers: int = 10,
+    count: int | None = None,
+    max_workers: int | None = None,
 ) -> list[requests.Response]:
+    count = count or _positive_env_int("SHIPYARD_E2E_REQUEST_COUNT", 50)
+    max_workers = max_workers or _positive_env_int(
+        "SHIPYARD_E2E_MAX_WORKERS",
+        10,
+    )
     authorization = session.headers["Authorization"]
     expected_header_hash = sha256(authorization.encode()).hexdigest()[:16]
 
@@ -425,6 +439,7 @@ def run() -> dict:
     conftest._seed_database()
     app = create_app()
     app.config["TESTING"] = False
+    limiter._storage.reset()
 
     run_id = uuid.uuid4().hex[:10].upper()
     ship_no = f"HE2E{run_id[:6]}"

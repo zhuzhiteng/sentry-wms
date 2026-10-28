@@ -55,12 +55,12 @@ Windows.
 Commands use a dedicated `sentry_test` database.
 
 ```text
-Backend: 3048 passed, 55 skipped, 11 warnings
-Admin:   32 test files passed, 203 tests passed
+Backend: 3050 passed, 55 skipped, 11 warnings
+Admin:   33 test files passed, 204 tests passed
 Miniprogram: 17 tests passed
 Admin build: production build passed
 Schema:  087 applied twice to test; fresh db/schema.sql created
-HTTP E2E: passed (50 requests per operation, 10 concurrent)
+HTTP E2E: passed (50 requests/10 concurrent; 250 requests/50 concurrent stress)
 ```
 
 The admin suite passed as four serialized-worker shards: each shard ran eight
@@ -109,6 +109,17 @@ every route must return `403` without its page permission, and all 26 non-GET
 routes must return `403` for a viewer with those pages but no business role.
 The same suite reproduces warehouse-2 manager access to a warehouse-1 zone
 mapping and requires `403`.
+
+The standalone E2E resets the process-local rate limiter at startup, so repeat
+runs do not inherit the previous run's `300/min` request count. It accepts
+`SHIPYARD_E2E_REQUEST_COUNT` and `SHIPYARD_E2E_MAX_WORKERS` for bounded stress
+runs.
+
+JWT validation allows a 5-second clock skew by default, with a hard 60-second
+maximum. This prevents a newly issued token from becoming temporarily invalid
+when the host wall clock adjusts by one or two seconds. Tests accept a future
+`iat` of 2 seconds and still reject 30 seconds; two consecutive
+250-request/50-worker E2E runs passed.
 
 The development override avoids production-only webhook SSRF startup guards.
 It does not disable authentication, tenant checks, or inventory locking.

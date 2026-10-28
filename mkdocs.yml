@@ -50,6 +50,7 @@ nav:
       - 扫码收货: shipyard/receipt-api.md
       - 配送与发货单: shipyard/outbound-documents-api.md
       - 正式出库与装车: shipyard/formal-outbound-api.md
+      - 风险闭环台账: shipyard/risk-register.md
   - Test Lab: test-lab.md
   - Contributing: contributing.md
   - Changelog: changelog.md
